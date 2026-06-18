@@ -159,32 +159,43 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
         # Render full page as pixmap to capture vector charts/figures
         try:
             drawings = page.get_drawings()
+            page_rect = page.rect
+            total_drawings = len(drawings)
 
-            # Log drawing stats for tuning visibility
-            substantial_drawings = [
-                d for d in drawings
-                if d.get("rect") and
-                fitz.Rect(d["rect"]).width > 50 and
-                fitz.Rect(d["rect"]).height > 50
-            ]
-            print(f"[extractor] Page {page_num}: {len(drawings)} total drawings, {len(substantial_drawings)} substantial")
+            ZONE_COUNT = 6
+            zone_height = page_rect.height / ZONE_COUNT
+            zone_drawing_counts = [0] * ZONE_COUNT
 
-            # Only render if enough substantial drawings exist (filters out table borders and decorators)
-            has_vector_graphics = len(substantial_drawings) > 8
+            for d in drawings:
+                r = d.get("rect")
+                if not r:
+                    continue
+                r = fitz.Rect(r)
+                # Exclude full-width elements — page borders, horizontal rules, table edges
+                if r.width > page_rect.width * 0.80:
+                    continue
+                center_y = (r.y0 + r.y1) / 2
+                zone_idx = min(int(center_y / zone_height), ZONE_COUNT - 1)
+                zone_drawing_counts[zone_idx] += 1
 
-            # Additional guard: skip if no single drawing is tall enough to be a chart
-            if has_vector_graphics and substantial_drawings:
-                max_drawing_height = max(
-                    fitz.Rect(d["rect"]).height
-                    for d in substantial_drawings
-                    if d.get("rect")
-                )
-                if max_drawing_height < 80:
-                    has_vector_graphics = False
-                    print(f"[extractor] Page {page_num}: skipping render — no tall drawings (max height {max_drawing_height:.1f}pt)")
+            max_zone_density = max(zone_drawing_counts) if zone_drawing_counts else 0
+
+            # ── Hybrid trigger: local clustering AND overall complexity ──────
+            ZONE_DENSITY_THRESHOLD = 7
+            TOTAL_DRAWINGS_THRESHOLD = 15
+
+            has_vector_graphics = (
+                max_zone_density >= ZONE_DENSITY_THRESHOLD
+                and total_drawings >= TOTAL_DRAWINGS_THRESHOLD
+            )
+
+            print(
+                f"[extractor] Page {page_num}: total_drawings={total_drawings} | "
+                f"zones={zone_drawing_counts} | max_zone_density={max_zone_density} | "
+                f"trigger={'RENDER' if has_vector_graphics else 'skip'}"
+            )
 
             if has_vector_graphics and not image_list:
-                print(f"[extractor] Page {page_num}: rendering as PAGE SNAPSHOT")
                 mat = fitz.Matrix(2.0, 2.0)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 page_image_filename = f"{source_name}_p{page_num}_fullpage.png"
@@ -204,13 +215,13 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                         "extension": "png",
                         "is_page_render": True,
                         "image_type": "page_snapshot",
+                        "max_zone_density": max_zone_density,
+                        "total_drawings": total_drawings,
                     },
                     "vision_summary": "",
                     "keywords": [],
                 }
                 elements.append(elem)
-            elif not image_list:
-                print(f"[extractor] Page {page_num}: skipping render — threshold not met")
 
         except Exception as e:
             print(f"[extractor] vector/page render error page {page_num}: {e}")
