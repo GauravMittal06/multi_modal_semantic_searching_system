@@ -1,0 +1,14 @@
+streamlit
+fastapi
+uvicorn
+python-dotenv
+google-genai
+qdrant-client
+pymupdf
+pdfplumber
+python-docx
+networkx
+pillow
+camelot-py[cv]
+pandas
+sentence-transformers
