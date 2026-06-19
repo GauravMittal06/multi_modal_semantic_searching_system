@@ -91,16 +91,17 @@ def analyze_image(image_path: str) -> Dict[str, Any]:
 
         prompt = """Analyze this image from a business/technical document.
 
-Provide:
-1. A concise semantic summary (2-4 sentences) describing what this image shows, what data it contains, and what insight it conveys. Focus on meaning, not appearance.
-2. A comma-separated list of 5-8 keywords representing the key topics/concepts in this image.
+            Provide:
+            1. A concise semantic summary (2-4 sentences) describing what this image shows, what data it contains, and what insight it conveys. Focus on meaning, not appearance.
+            2. A comma-separated list of 5-8 keywords representing the key topics/concepts in this image.
+            3. Every extractable hard fact: title, axis labels, legend labels, exact numeric values, percentages, totals, units, time periods, stated trends. Semicolon-separated. Write "N/A" if not a chart/graph.
 
-Format your response EXACTLY as:
-SUMMARY: <your summary here>
-KEYWORDS: <keyword1>, <keyword2>, <keyword3>, ...
+            Format your response EXACTLY as:
+            SUMMARY: <your summary here>
+            KEYWORDS: <keyword1>, <keyword2>, <keyword3>, ...
+            CHART_FACTS: <fact1>; <fact2>; ...
 
-Do NOT describe colors, layout, or aesthetics. Focus on data, trends, relationships, and meaning."""
-
+            Do NOT describe colors, layout, or aesthetics. Focus on data, trends, relationships, and meaning."""
         response = client.models.generate_content(
             model=GEMINI_VISION_MODEL,
             contents=[
@@ -115,6 +116,7 @@ Do NOT describe colors, layout, or aesthetics. Focus on data, trends, relationsh
         response_text = response.text or ""
         summary = ""
         keywords = []
+        chart_facts = ""
 
         for line in response_text.splitlines():
             if line.startswith("SUMMARY:"):
@@ -122,11 +124,13 @@ Do NOT describe colors, layout, or aesthetics. Focus on data, trends, relationsh
             elif line.startswith("KEYWORDS:"):
                 kw_raw = line.replace("KEYWORDS:", "").strip()
                 keywords = [k.strip() for k in kw_raw.split(",") if k.strip()]
+            elif line.startswith("CHART_FACTS:"):
+                chart_facts = line.replace("CHART_FACTS:", "").strip()
 
         if not summary:
             summary = response_text.strip()
 
-        result = {"vision_summary": summary, "keywords": keywords}
+        result = {"vision_summary": summary, "keywords": keywords, "chart_facts": chart_facts}
         _save_cache(image_path, result)
         return result
 
@@ -135,6 +139,7 @@ Do NOT describe colors, layout, or aesthetics. Focus on data, trends, relationsh
         return {
             "vision_summary": f"Image analysis unavailable: {str(e)}",
             "keywords": [],
+            "chart_facts": "",
         }
     
 def enrich_image_elements(elements: List[Dict[str, Any]], max_workers: int = 4) -> List[Dict[str, Any]]:
@@ -159,7 +164,10 @@ def enrich_image_elements(elements: List[Dict[str, Any]], max_workers: int = 4) 
         result = analyze_image(image_path)
         elem["vision_summary"] = result["vision_summary"]
         elem["keywords"] = result["keywords"]
-        elem["content"] = result["vision_summary"]
+        elem["chart_facts"] = result.get("chart_facts", "")
+        elem["content"] = result["vision_summary"] + (
+            f"\nChart facts: {elem['chart_facts']}" if elem["chart_facts"] and elem["chart_facts"] != "N/A" else ""
+        )
         return elem
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:

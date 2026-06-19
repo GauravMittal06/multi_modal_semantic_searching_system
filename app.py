@@ -119,7 +119,7 @@ with st.sidebar:
         if st.button("🚀 Ingest Document", use_container_width=True, type="primary"):
             with st.spinner("Ingesting document... this may take a minute."):
                 try:
-                    clear_temp_vision_artifacts()
+                    # clear_temp_vision_artifacts()
                     suffix = os.path.splitext(uploaded_file.name)[1]
                     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                         tmp.write(uploaded_file.getbuffer())
@@ -153,6 +153,12 @@ with st.sidebar:
             st.session_state.chat_history = []
             st.session_state.ingest_stats = None
             st.rerun()
+
+    st.divider()
+
+    if st.button("🧹 Clear Vision Cache", use_container_width=True):
+        clear_temp_vision_artifacts()
+        st.success("Vision cache cleared.")
 
 # ─── Main Area ────────────────────────────────────────────────────────────────
 st.title("🧠 Multi-Modal Document Intelligence")

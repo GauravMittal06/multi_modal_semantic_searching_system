@@ -39,6 +39,31 @@ from sentence_transformers import SentenceTransformer
 _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 print("[rag_core] Sentence transformer loaded.")
 
+from sentence_transformers import CrossEncoder
+_reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
+def rerank_pairs(query: str, candidates: List[str]) -> List[float]:
+    """
+    Cross-encoder reranking.
+
+    Input:
+        query = user question
+        candidates = retrieved text/image/table contents
+
+    Output:
+        relevance scores
+    """
+    if not candidates:
+        return []
+
+    pairs = [[query, c] for c in candidates]
+
+    try:
+        scores = _reranker.predict(pairs)
+        return scores.tolist()
+    except Exception as e:
+        print(f"[rag_core] rerank_pairs failed: {e}")
+        return [0.0] * len(candidates)
 
 # ─── Collection management ───────────────────────────────────────────────────
 
@@ -111,6 +136,7 @@ def upsert_elements(elements: List[Dict[str, Any]], embeddings: List[List[float]
             "vision_summary": elem.get("vision_summary", ""),
             "keywords": elem.get("keywords", []),
             "metadata": elem.get("metadata", {}),
+            "chart_facts": elem.get("chart_facts", ""),
         }
         point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, elem["id"]))
         points.append(qmodels.PointStruct(id=point_id, vector=vec, payload=payload))
@@ -134,7 +160,13 @@ def search_elements(
     """
     if _qdrant is None:
         raise RuntimeError("Qdrant not configured.")
-    _ensure_collection(len(query_vector))
+    
+    try:
+        _qdrant.get_collection(QDRANT_COLLECTION)
+    except Exception as e:
+        raise RuntimeError(
+            f"Qdrant collection '{QDRANT_COLLECTION}' unavailable: {e}"
+        )
 
     must_conditions = []
     if source_document:

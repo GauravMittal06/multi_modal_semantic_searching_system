@@ -37,6 +37,13 @@ def _make_element(
 
 
 # ─── PDF Extractor ────────────────────────────────────────────────────────────
+def _line_text(line):
+    spans = line.get("spans", [])
+    return " ".join(
+        s.get("text", "").strip()
+        for s in spans
+        if s.get("text", "").strip()
+    ).strip()
 
 def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
     elements: List[Dict[str, Any]] = []
@@ -46,42 +53,101 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
     doc = fitz.open(filepath)
     for page_num, page in enumerate(doc, start=1):
         blocks = page.get_text("dict")["blocks"]
+        all_sizes = [span.get("size", 12) for block in blocks if block.get("type") == 0
+                     for line in block.get("lines", []) for span in line.get("spans", [])
+                     if span.get("text", "").strip()]
+        page_median_font = sorted(all_sizes)[len(all_sizes)//2] if all_sizes else 12
         for block in blocks:
-            if block.get("type") != 0:  # 0 = text
+            if block.get("type") != 0:
                 continue
+            
+            block_lines = []
+            max_font_size = 0
+            has_bold = False
+        
             for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    text = span.get("text", "").strip()
-                    if not text:
-                        continue
-                    font_size = span.get("size", 12)
-                    font_flags = span.get("flags", 0)
-                    is_bold = bool(font_flags & 2**4)
-
-                    # Heading heuristic: large font or bold + short text
-                    words = text.split()
-                    digit_ratio = sum(1 for w in words if w.replace("$","").replace("%","").replace(",","").replace(".","").replace("+","").replace("-","").strip().isdigit()) / max(len(words), 1)
-                    is_heading = (
-                        (font_size >= 18 or (is_bold and font_size >= 16)) # Increased font thresholds
-                        and len(text) < 80
-                        and len(words) >= 1
-                        and len(words) <= 10 # Tighter word limit
-                        and digit_ratio < 0.15 # Headings almost never have heavy numbers
-                        and not text.strip().endswith((".", ":", ";", ",", "?"))
-                        and not any(c in text for c in ["|", "\t"])
+                text = _line_text(line)
+        
+                if not text:
+                    continue
+                
+                block_lines.append(text)
+        
+                spans = line.get("spans", [])
+        
+                line_font = max(
+                    (s.get("size", 12) for s in spans),
+                    default=12
+                )
+        
+                max_font_size = max(max_font_size, line_font)
+        
+                if any(bool(s.get("flags", 0) & (2**4)) for s in spans):
+                    has_bold = True
+        
+            block_text = " ".join(block_lines).strip()
+        
+            if len(block_text) < 5:
+                continue
+            
+            words = block_text.split()
+        
+            digit_ratio = (
+                sum(
+                    1
+                    for w in words
+                    if w.replace("$", "")
+                    .replace("%", "")
+                    .replace(",", "")
+                    .replace(".", "")
+                    .replace("+", "")
+                    .replace("-", "")
+                    .isdigit()
+                )
+                / max(len(words), 1)
+            )
+        
+            is_heading = (
+                (max_font_size > page_median_font * 1.15
+                 or (has_bold and max_font_size > page_median_font * 1.05))
+                and len(block_text) < 120
+                and 2 <= len(words) <= 20
+                and digit_ratio < 0.15
+                and not block_text.endswith((".", ":", ";", ",", "?"))
+            )
+        
+            if (
+                block_text.lower() in {"n", "o"}
+                or block_text in {"}", "{", ")", "(", "]", "[", "|"}
+            ):
+                is_heading = False
+        
+            if is_heading:
+                current_heading = block_text
+        
+                elements.append(
+                    _make_element(
+                        "heading",
+                        block_text,
+                        page_num,
+                        current_heading,
+                        source_name,
+                        {"font_size": max_font_size},
                     )
-                    if is_heading:
-                        current_heading = text
-                        elements.append(_make_element(
-                            "heading", text, page_num, current_heading,
-                            source_name, {"font_size": font_size}
-                        ))
-                    elif len(text) > 30:
-                        elements.append(_make_element(
-                            "paragraph", text, page_num, current_heading,
-                            source_name, {}
-                        ))
-
+                )
+        
+            else:
+                if len(block_text) > 20:
+                    elements.append(
+                        _make_element(
+                            "paragraph",
+                            block_text,
+                            page_num,
+                            current_heading,
+                            source_name,
+                            {},
+                        )
+                    )
     # --- Tables via pdfplumber ---
     try:
         import pdfplumber
@@ -229,6 +295,17 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
         except Exception as e:
             print(f"[extractor] vector/page render error page {page_num}: {e}")
 
+    print("\n=== HEADING DEBUG ===")
+
+    for e in elements:
+        if e["type"] == "heading":
+            print(
+                f"page={e['page_number']} | "
+                f"heading={e['content']}"
+            )
+
+    print("=====================\n")
+
     doc.close()
     return elements
 
@@ -243,6 +320,9 @@ def extract_from_docx(filepath: str, source_name: str) -> List[Dict[str, Any]]:
     doc = Document(filepath)
     current_heading = "Introduction"
     page_num = 1
+
+    all_font_sizes = [r.font.size.pt for p in doc.paragraphs for r in p.runs if r.font.size]
+    doc_median_font = sorted(all_font_sizes)[len(all_font_sizes)//2] if all_font_sizes else 11
 
     # crude page estimator — docx has no real page numbers, so we
     # accumulate character count and roll over every ~CHARS_PER_PAGE
@@ -261,6 +341,8 @@ def extract_from_docx(filepath: str, source_name: str) -> List[Dict[str, Any]]:
         if not text or len(text) > 90:
             return False
         words = text.split()
+        if len(text.strip()) < 8:
+            return False
         if len(words) < 2:
             return False
         # fallback heuristic: bold/large-font short paragraphs act as headings
@@ -271,7 +353,7 @@ def extract_from_docx(filepath: str, source_name: str) -> List[Dict[str, Any]]:
         bold_run_chars = sum(len(r.text) for r in runs if r.bold)
         total_chars = sum(len(r.text) for r in runs) or 1
         mostly_bold = (bold_run_chars / total_chars) > 0.6
-        large_font = any((r.font.size and r.font.size.pt >= 13) for r in runs)
+        large_font = any((r.font.size and r.font.size.pt > doc_median_font * 1.15) for r in runs)
         is_upper_or_titled = text.isupper() or text.istitle()
         return mostly_bold and (large_font or is_upper_or_titled)
 
@@ -364,9 +446,25 @@ def extract_document(filepath: str, source_name: str = None) -> List[Dict[str, A
 # ─── Internal helpers ─────────────────────────────────────────────────────────
 
 def _get_heading_for_page(elements: List[Dict], page_num: int) -> str:
-    """Returns the most recent heading seen up to this page."""
+    """
+    Prefer a heading from the same page.
+    If none exists, fall back to the most recent previous heading.
+    """
+
+    page_headings = [
+        e["content"]
+        for e in elements
+        if e["type"] == "heading"
+        and e["page_number"] == page_num
+    ]
+
+    if page_headings:
+        return page_headings[-1]
+
     heading = "Introduction"
+
     for e in elements:
-        if e["type"] == "heading" and e["page_number"] <= page_num:
+        if e["type"] == "heading" and e["page_number"] < page_num:
             heading = e["content"]
+
     return heading

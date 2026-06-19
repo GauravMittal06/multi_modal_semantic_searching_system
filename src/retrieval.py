@@ -4,14 +4,19 @@ Cross-Element Retrieval — Module 4
 Retrieves semantically relevant elements AND their related elements
 (tables, images, paragraphs) to build a complete distributed context.
 """
-
+import re
 from typing import List, Dict, Any, Optional
 
 try:
-    from .rag_core import embed_query, search_elements, fetch_elements_by_ids
+    from .rag_core import embed_query, search_elements, fetch_elements_by_ids, rerank_pairs
 except ImportError:
-    from rag_core import embed_query, search_elements, fetch_elements_by_ids
+    from rag_core import embed_query, search_elements, fetch_elements_by_ids, rerank_pairs
 
+TABLE_THRESHOLD = -1.5
+IMAGE_THRESHOLD = -1.0
+CITATION_THRESHOLD = -0.5
+HIGH_CONFIDENCE = 2.5
+MEDIUM_CONFIDENCE = 0.0
 
 def retrieve_context(
     question: str,
@@ -21,6 +26,7 @@ def retrieve_context(
 ) -> List[Dict[str, Any]]:
 
     q_vec = embed_query(question)
+    ref = _extract_reference(question)
     if not q_vec:
         print("[retrieval] embed_query returned empty vector")
         return []
@@ -28,7 +34,7 @@ def retrieve_context(
     print(f"[retrieval] Searching with source_document filter: '{source_document}'")
     primary_hits = search_elements(
         query_vector=q_vec,
-        k=top_k,
+        k=40,
         source_document=source_document,
     )
     print(f"[retrieval] primary_hits count: {len(primary_hits)}")
@@ -50,31 +56,74 @@ def retrieve_context(
             print(f"  → source_document in payload: '{h.get('source_document')}'")
         return []
 
-    # ── Type weights for reranking ────────────────────────────────────────────
-    TYPE_WEIGHT = {
-        "table":     1.10,
-        "paragraph": 1.00,
-        "image":     0.80,
-        "heading":   0.70,
-    }
+    primary_texts = [h.get("vision_summary") or h.get("content", "") for h in primary_hits]
+    primary_scores = rerank_pairs(question, primary_texts)
 
-    def _rerank_score(hit):
-        base = hit.get("score", 0.0)
-        type_mult = TYPE_WEIGHT.get(hit.get("type", "paragraph"), 1.00)
-        # Removed the is_page_render penalty so we don't drop charts
-        return base * type_mult
+    for h, s in zip(primary_hits, primary_scores):
 
-    primary_hits.sort(key=_rerank_score, reverse=True)
+        vector_score = h.get("score", 0.0)
+
+        h["reranked_score"] = (
+            0.35 * vector_score
+            + 0.65 * s
+        )
+
+        print(
+            f"[fusion] "
+            f"vector={vector_score:.3f} "
+            f"cross={s:.3f} "
+            f"final={h['reranked_score']:.3f}"
+        )
+        
+        
+    # ── Figure/Table reference boost ───────────────────────────────
+
+    if ref:
+        target = f"{ref['kind']} {ref['number']}".lower()
+
+        print(f"[retrieval] Detected reference query: {target}")
+
+        for hit in primary_hits:
+            text = (
+                (hit.get("content", "") or "")
+                + " "
+                + (hit.get("vision_summary", "") or "")
+            ).lower()
+
+            if target in text:
+                hit["reranked_score"] += 100.0
+
+                print(
+                    f"[retrieval] Boosted reference match "
+                    f"page={hit.get('page_number')} "
+                    f"type={hit.get('type')}"
+                )
+
+    primary_hits.sort(key=lambda h: h["reranked_score"], reverse=True)
+    print("\n===== TOP 20 AFTER RERANK =====")
+
+    for hit in primary_hits[:20]:
+        print(
+            f"\nPAGE {hit.get('page_number')}"
+            f"\nTYPE {hit.get('type')}"
+            f"\nSECTION {hit.get('section_heading')}"
+            f"\nSCORE {hit.get('reranked_score'):.3f}"
+        )
+    
+        print(
+            (hit.get("content") or hit.get("vision_summary") or "")[:500]
+        )
+    expanded_seed_hits = primary_hits[:15]
+    primary_hits = primary_hits[:8]
 
     seen_ids = set()
     context_elements = []
 
-    for hit in primary_hits:
+    for hit in expanded_seed_hits:
         eid = hit.get("element_id", "")
         if eid and eid not in seen_ids:
             seen_ids.add(eid)
             hit["is_primary"] = True
-            hit["reranked_score"] = _rerank_score(hit)
             context_elements.append(hit)
 
     # ── Determine if query is page-focused ───────────────────────────────────
@@ -94,15 +143,22 @@ def retrieve_context(
         source_document=source_document,
         element_types=["table"],
     )
-    for hit in table_hits:
+    table_texts = [h.get("content", "") for h in table_hits]
+    table_scores = rerank_pairs(question, table_texts)
+    for hit, reranked in zip(table_hits, table_scores):
+
+        vector_score = hit.get("score", 0.0)
+
+        reranked = (
+            0.35 * vector_score
+            + 0.65 * reranked
+        )
+        print(f"[calibration] table score={reranked:.4f}")
         eid = hit.get("element_id", "")
         if eid and eid not in seen_ids:
-            reranked = _rerank_score(hit)
-            # Always include tables from pages already in context
-            # For off-page tables, require minimum relevance score
-            hit_page = hit.get("page_number")
-            if hit_page not in covered_pages and reranked < 0.45:
+            if reranked < TABLE_THRESHOLD:
                 continue
+        
             seen_ids.add(eid)
             hit["is_primary"] = True
             hit["reranked_score"] = reranked
@@ -111,16 +167,24 @@ def retrieve_context(
     # ── Forced image fetch — skip low-score images on focused queries ─────────
     image_hits = search_elements(
         query_vector=q_vec,
-        k=10,  # Increased search radius from 3 to 10
+        k=10,
         source_document=source_document,
         element_types=["image"],
     )
-    for hit in image_hits:
+    image_texts = [h.get("vision_summary") or h.get("content", "") for h in image_hits]
+    image_scores = rerank_pairs(question, image_texts)
+    for hit, reranked in zip(image_hits, image_scores):
+
+        vector_score = hit.get("score", 0.0)
+
+        reranked = (
+            0.35 * vector_score
+            + 0.65 * reranked
+        )
+        print(f"[calibration] image score={reranked:.4f}")
         eid = hit.get("element_id", "")
         if eid and eid not in seen_ids:
-            reranked = _rerank_score(hit)
-            # Lowered flat threshold so charts survive the cut
-            if reranked < 0.15:
+            if reranked < IMAGE_THRESHOLD:
                 continue
             seen_ids.add(eid)
             hit["is_primary"] = True
@@ -131,12 +195,13 @@ def retrieve_context(
         return context_elements
 
     # ── Related expansion: cap per primary hit, skip headings ────────────────
-    MAX_RELATED_PER_HIT = 5
+    MAX_RELATED_PER_HIT = 2
     related_ids_to_fetch = []
 
     for hit in primary_hits:
-        # if hit.get("type") == "heading":
-            # continue
+        # if hit.get("reranked_score", 0) < 0:
+        #     continue
+
         added_for_this_hit = 0
         for rel_id in hit.get("related_elements", []):
             if added_for_this_hit >= MAX_RELATED_PER_HIT:
@@ -163,14 +228,22 @@ def retrieve_context(
             )
             if hit.get("type") == "heading":
                 continue
-            # Drop related elements from totally unrelated pages AND sections
             hit_page = hit.get("page_number")
             hit_section = hit.get("section_heading", "")
             if hit_page not in primary_pages and hit_section not in primary_sections:
                 continue
             hit["is_primary"] = False
             hit["score"] = 0.0
-            hit["reranked_score"] = 0.0
+            parent_score = max(
+                (
+                    h.get("reranked_score", 0)
+                    for h in primary_hits
+                    if hit_page == h.get("page_number")
+                ),
+                default=0.0,
+            )
+
+            hit["reranked_score"] = parent_score * 0.8
             context_elements.append(hit)
 
     # ── Final dedup by element_id ─────────────────────────────────────────────
@@ -221,6 +294,21 @@ def retrieve_context(
 
     return balanced
 
+def _extract_reference(query: str):
+    m = re.search(
+        r"(figure|fig\.?|table)\s+(\d+(?:\.\d+)?)",
+        query,
+        re.I,
+    )
+
+    if not m:
+        return None
+
+    return {
+        "kind": m.group(1).lower(),
+        "number": m.group(2),
+    }
+
 def format_context_for_llm(context_elements: List[Dict[str, Any]]) -> str:
     """
     Formats retrieved elements into a structured context string for the LLM prompt.
@@ -240,6 +328,9 @@ def format_context_for_llm(context_elements: List[Dict[str, Any]]) -> str:
         # Content: for images use vision_summary; for others use content
         if elem_type == "IMAGE":
             content = elem.get("vision_summary") or elem.get("content", "")
+            chart_facts = elem.get("chart_facts", "")
+            if chart_facts and chart_facts != "N/A":
+                content += f"\nChart facts: {chart_facts}"
             keywords = elem.get("keywords", [])
             if keywords:
                 content += f"\nKeywords: {', '.join(keywords)}"
@@ -274,7 +365,7 @@ def build_citations(context_elements: List[Dict[str, Any]]) -> List[Dict[str, An
             continue
 
         # Skip forced-in elements that scored too low to be genuinely relevant
-        if elem.get("reranked_score", 1.0) < 0.25:
+        if elem.get("reranked_score", 1.0) < CITATION_THRESHOLD:
             continue
 
         page = elem.get("page_number", "?")
@@ -329,7 +420,21 @@ def build_explainability(
     """
     _seen_evidence_keys = set()
     evidence = []
+    citation_keys = {
+        (
+            c["page_number"],
+            c["element_type"]
+        )
+        for c in citations
+    }
+
     for e in context_elements:
+
+        if (
+            e.get("page_number"),
+            e.get("type")
+        ) not in citation_keys:
+            continue
         if e.get("type") == "heading":
             continue
         if not ((e.get("content") or "").strip() or (e.get("vision_summary") or "").strip()):
@@ -356,26 +461,27 @@ def build_explainability(
     # ── Relationships used (human-readable, derived from shared section) ──────
     relationships_used: List[str] = []
     seen_rel = set()
-    for i, a in enumerate(evidence):
-        for b in evidence[i + 1:]:
-            if a.get("section_heading") and a.get("section_heading") == b.get("section_heading"):
-                label = _humanize_relation(a.get("type", ""), b.get("type", ""))
-                if label and label not in seen_rel:
-                    seen_rel.add(label)
-                    relationships_used.append(label)
+    # for i, a in enumerate(evidence):
+    #     for b in evidence[i + 1:]:
+    #         if a.get("section_heading") and a.get("section_heading") == b.get("section_heading"):
+    #             label = _humanize_relation(a.get("type", ""), b.get("type", ""))
+    #             if label and label not in seen_rel:
+    #                 seen_rel.add(label)
+    #                 relationships_used.append(label)
 
-            for para, img in ((a, b), (b, a)):
-                if para.get("type") == "paragraph" and img.get("type") == "image":
-                    content = (para.get("content") or "").lower()
-                    if len(content.split()) <= 15 and any(
-                        k in content for k in ["figure", "fig.", "chart", "table"]
-                    ):
-                        label = "Caption supports Image"
-                        if label not in seen_rel:
-                            seen_rel.add(label)
-                            relationships_used.append(label)
+    #         for para, img in ((a, b), (b, a)):
+    #             if para.get("type") == "paragraph" and img.get("type") == "image":
+    #                 content = (para.get("content") or "").lower()
+    #                 if len(content.split()) <= 15 and any(
+    #                     k in content for k in ["figure", "fig.", "chart", "table"]
+    #                 ):
+    #                     label = "Caption supports Image"
+    #                     if label not in seen_rel:
+    #                         seen_rel.add(label)
+    #                         relationships_used.append(label)
 
-    relationships_used = relationships_used[:6]
+    # relationships_used = relationships_used[:6]
+    relationships_used = []
 
     # ── Modalities used ────────────────────────────────────────────────────────
     types_present = set(e.get("type") for e in evidence)
@@ -405,9 +511,11 @@ def build_explainability(
         e.get("reranked_score", 0.0) for e in context_elements if e.get("is_primary")
     ) / max(sum(1 for e in context_elements if e.get("is_primary")), 1)
 
-    if n >= 4 and modality_count >= 2 and citations and avg_score >= 0.45:
+    if avg_score >= HIGH_CONFIDENCE and citations:
         confidence = "High"
-    elif n >= 2 and avg_score >= 0.30:
+        if modality_count < 2:
+            confidence = "Medium"
+    elif avg_score >= MEDIUM_CONFIDENCE:
         confidence = "Medium"
     else:
         confidence = "Low"

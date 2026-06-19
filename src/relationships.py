@@ -10,7 +10,16 @@ Builds a lightweight NetworkX graph linking document elements by:
 
 from typing import List, Dict, Any
 import networkx as nx
+import numpy as np
+from src.rag_core import embed_passages
 
+SIM_THRESHOLD = 0.60
+SAME_SECTION_BONUS = 0.10
+SAME_PAGE_BONUS = 0.05
+
+def _cos(a, b):
+    a, b = np.array(a), np.array(b)
+    return float(np.dot(a,b) / (np.linalg.norm(a)*np.linalg.norm(b) + 1e-9))
 
 def build_relationship_graph(elements: List[Dict[str, Any]]) -> nx.DiGraph:
     """
@@ -18,6 +27,19 @@ def build_relationship_graph(elements: List[Dict[str, Any]]) -> nx.DiGraph:
     where nodes are element IDs and edges are labeled relationships.
     """
     G = nx.DiGraph()
+    
+    embeds = embed_passages([e.get("content","") or e.get("vision_summary","") for e in elements])
+    emb_map = {e["id"]: v for e, v in zip(elements, embeds)}
+
+    def _hybrid_score(e1, e2):
+        sim = _cos(emb_map[e1["id"]], emb_map[e2["id"]])
+        bonus = 0.0
+        if e1.get("section_heading") == e2.get("section_heading") and e1.get("section_heading"):
+            bonus += SAME_SECTION_BONUS
+        if e1.get("page_number") == e2.get("page_number"):
+            bonus += SAME_PAGE_BONUS
+        return 0.7 * sim + 0.3 * (bonus / 0.15)  # normalize bonus to 0-1 range before weighting
+
 
     # Add all nodes
     for elem in elements:
@@ -45,7 +67,17 @@ def build_relationship_graph(elements: List[Dict[str, Any]]) -> nx.DiGraph:
             for elem in page_elems:
                 if elem["id"] == heading["id"]:
                     continue
-                if elem.get("section_heading") == heading["content"]:
+                heading_text = heading["content"].strip().lower()
+                section_text = elem.get("section_heading", "").strip().lower()
+                
+                if (
+                    heading_text
+                    and section_text
+                    and (
+                        heading_text in section_text
+                        or section_text in heading_text
+                    )
+                ):
                     G.add_edge(heading["id"], elem["id"], relation="owns")
                     if heading["id"] not in elem["related_elements"]:
                         elem["related_elements"].append(heading["id"])
@@ -55,7 +87,7 @@ def build_relationship_graph(elements: List[Dict[str, Any]]) -> nx.DiGraph:
         # Paragraph → explains → Table (same page, same section)
         for para in paragraphs:
             for table in tables:
-                if table.get("section_heading") == para.get("section_heading"):
+                if _hybrid_score(para, table) > SIM_THRESHOLD:
                     G.add_edge(para["id"], table["id"], relation="explains")
                     if table["id"] not in para["related_elements"]:
                         para["related_elements"].append(table["id"])
@@ -65,7 +97,7 @@ def build_relationship_graph(elements: List[Dict[str, Any]]) -> nx.DiGraph:
         # Paragraph → references → Image (same page, same section)
         for para in paragraphs:
             for image in images:
-                if image.get("section_heading") == para.get("section_heading"):
+                if _hybrid_score(para, image) > SIM_THRESHOLD:
                     G.add_edge(para["id"], image["id"], relation="references")
                     if image["id"] not in para["related_elements"]:
                         para["related_elements"].append(image["id"])
