@@ -62,10 +62,12 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                     words = text.split()
                     digit_ratio = sum(1 for w in words if w.replace("$","").replace("%","").replace(",","").replace(".","").replace("+","").replace("-","").strip().isdigit()) / max(len(words), 1)
                     is_heading = (
-                        (font_size >= 16 or (is_bold and font_size >= 13))
+                        (font_size >= 18 or (is_bold and font_size >= 16)) # Increased font thresholds
                         and len(text) < 80
-                        and len(words) >= 3
-                        and digit_ratio < 0.4
+                        and len(words) >= 1
+                        and len(words) <= 10 # Tighter word limit
+                        and digit_ratio < 0.15 # Headings almost never have heavy numbers
+                        and not text.strip().endswith((".", ":", ";", ",", "?"))
                         and not any(c in text for c in ["|", "\t"])
                     )
                     if is_heading:
@@ -195,7 +197,8 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                 f"trigger={'RENDER' if has_vector_graphics else 'skip'}"
             )
 
-            if has_vector_graphics and not image_list:
+            # Removed 'and not image_list' so charts are always captured
+            if has_vector_graphics:
                 mat = fitz.Matrix(2.0, 2.0)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 page_image_filename = f"{source_name}_p{page_num}_fullpage.png"
@@ -239,36 +242,108 @@ def extract_from_docx(filepath: str, source_name: str) -> List[Dict[str, Any]]:
     elements: List[Dict[str, Any]] = []
     doc = Document(filepath)
     current_heading = "Introduction"
-    page_num = 1  # DOCX doesn't expose real page numbers easily
+    page_num = 1
 
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        if not text:
-            continue
-        style = para.style.name or ""
-        if style.startswith("Heading"):
-            current_heading = text
-            elements.append(_make_element(
-                "heading", text, page_num, current_heading,
-                source_name, {"style": style}
-            ))
-        elif len(text) > 20:
-            elements.append(_make_element(
-                "paragraph", text, page_num, current_heading,
-                source_name, {}
-            ))
+    # crude page estimator — docx has no real page numbers, so we
+    # accumulate character count and roll over every ~CHARS_PER_PAGE
+    CHARS_PER_PAGE = 3000
+    char_count = 0
 
-    for table in doc.tables:
-        rows = []
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells]
-            rows.append(" | ".join(cells))
-        table_text = "\n".join(rows)
-        if table_text.strip():
-            elements.append(_make_element(
-                "table", table_text, page_num, current_heading,
-                source_name, {}
-            ))
+    def _has_page_break(paragraph) -> bool:
+        brs = paragraph._p.xpath('.//w:br[@w:type="page"]')
+        return len(brs) > 0
+
+    def _is_heading_like(paragraph) -> bool:
+        style = paragraph.style.name or ""
+        if style.startswith("Heading") or style.startswith("Title"):
+            return True
+        text = paragraph.text.strip()
+        if not text or len(text) > 90:
+            return False
+        words = text.split()
+        if len(words) < 2:
+            return False
+        # fallback heuristic: bold/large-font short paragraphs act as headings
+        # even when not tagged with a Word "Heading" style
+        runs = paragraph.runs
+        if not runs:
+            return False
+        bold_run_chars = sum(len(r.text) for r in runs if r.bold)
+        total_chars = sum(len(r.text) for r in runs) or 1
+        mostly_bold = (bold_run_chars / total_chars) > 0.6
+        large_font = any((r.font.size and r.font.size.pt >= 13) for r in runs)
+        is_upper_or_titled = text.isupper() or text.istitle()
+        return mostly_bold and (large_font or is_upper_or_titled)
+
+    # build a table -> preceding-paragraph-index map so tables can be
+    # inserted at the correct position relative to surrounding text
+    body_children = list(doc.element.body)
+    table_xml_elements = {id(t._tbl): t for t in doc.tables}
+
+    para_iter = iter(doc.paragraphs)
+
+    for child in body_children:
+        tag = child.tag.split('}')[-1]
+
+        if tag == "p":
+            para = next(para_iter, None)
+            if para is None:
+                continue
+            text = para.text.strip()
+
+            if _has_page_break(para):
+                page_num += 1
+                char_count = 0
+
+            if not text:
+                continue
+
+            char_count += len(text)
+            if char_count > CHARS_PER_PAGE:
+                page_num += 1
+                char_count = 0
+
+            if _is_heading_like(para):
+                current_heading = text
+                elements.append(_make_element(
+                    "heading", text, page_num, current_heading,
+                    source_name, {"style": para.style.name or ""}
+                ))
+            elif len(text) > 20:
+                elements.append(_make_element(
+                    "paragraph", text, page_num, current_heading,
+                    source_name, {}
+                ))
+
+        elif tag == "tbl":
+            tbl_obj = table_xml_elements.get(id(child))
+            if tbl_obj is None:
+                continue
+            rows = []
+            for row in tbl_obj.rows:
+                cells = [cell.text.strip() for cell in row.cells]
+                rows.append(" | ".join(cells))
+            table_text = "\n".join(rows)
+            if table_text.strip():
+                table_text_clean = table_text.replace("$", "USD ").replace("%", " pct")
+                header_hint = rows[0] if rows else ""
+                all_cells = []
+                for row in tbl_obj.rows[1:]:
+                    for cell in row.cells:
+                        ct = cell.text.strip().replace("$", "USD ").replace("%", " pct")
+                        if ct and len(ct) > 2:
+                            all_cells.append(ct)
+                semantic_tags = " | ".join(dict.fromkeys(all_cells[:12]))
+                table_text_with_hint = f"[TABLE COLUMNS: {header_hint}]\n[KEY VALUES: {semantic_tags}]\n{table_text_clean}"
+                elements.append(_make_element(
+                    "table", table_text_with_hint, page_num, current_heading,
+                    source_name, {
+                        "raw_rows": len(tbl_obj.rows),
+                        "raw_cols": len(tbl_obj.columns),
+                        "table_header": header_hint,
+                    }
+                ))
+                char_count += len(table_text)
 
     return elements
 

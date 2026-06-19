@@ -11,9 +11,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from config import GEMINI_KEY, GEMINI_MODEL
 
 try:
-    from .retrieval import retrieve_context, format_context_for_llm, build_citations
+    from .retrieval import retrieve_context, format_context_for_llm, build_citations, build_explainability
 except ImportError:
-    from retrieval import retrieve_context, format_context_for_llm, build_citations
+    from retrieval import retrieve_context, format_context_for_llm, build_citations, build_explainability
 
 
 def generate_answer(
@@ -43,11 +43,19 @@ def generate_answer(
             "answer": "I could not find relevant information in the document to answer this question.",
             "citations": [],
             "context_used": [],
+            "explainability": {
+                "evidence_used": [],
+                "relationships_used": [],
+                "modalities_used": {"text": False, "table": False, "image": False},
+                "retrieval_summary": {"total_elements": 0, "page_count": 0, "type_counts": {}},
+                "confidence": "Low",
+            },
             "error": None,
         }
 
     formatted_context = format_context_for_llm(context_elements)
     citations = build_citations(context_elements)
+    explainability = build_explainability(context_elements, citations)
 
     # Step 3: Build prompt
     prompt = f"""You are an expert document analyst. Answer questions using ONLY the provided document context below.
@@ -59,12 +67,14 @@ Context element types:
 - HEADING: section label only, not a source of facts
 
 Rules:
-1. Cross-reference paragraphs WITH tables AND images to form complete answers.
-2. When a TABLE contains relevant numbers, quote them explicitly.
-3. When an IMAGE description contains trends or insights, cite them as visual evidence.
-4. Never invent data. If context is insufficient, say: "The document does not contain sufficient information to answer this question."
-5. Numbers in context written as "USD" mean "$" and "pct" means "%".
-
+    1. Cross-reference paragraphs WITH tables AND images to form complete answers.
+    2. When a TABLE contains relevant numbers, quote them explicitly.
+    3. When an IMAGE description contains trends or insights, cite them as visual evidence.
+    4. Never invent data. If context is insufficient, say: "The document does not contain sufficient information to answer this question."
+    5. Numbers in context written as "USD" mean "$" and "pct" means "%".
+    6. If two or more pieces of evidence equally and independently support different conclusions, do NOT invent a tiebreaker (such as order of mention, alphabetical order, or position in a sentence) to force a single answer. Instead, explicitly state that the evidence is split, name each supporting conclusion, and explain exactly what evidence supports each one. Only pick a single answer if the evidence itself — not your own assumption — clearly favors one over the other.
+    7. If a TABLE element lacks a [TABLE COLUMNS:] header, treat the first pipe-separated row as the column header row when interpreting it.
+    
 CONTEXT:
 {formatted_context}
 
@@ -86,6 +96,7 @@ ANSWER:"""
             "answer": f"Answer generation failed: {str(e)}",
             "citations": citations,
             "context_used": context_elements,
+            "explainability": explainability,
             "error": str(e),
         }
 
@@ -93,5 +104,6 @@ ANSWER:"""
         "answer": answer.strip(),
         "citations": citations,
         "context_used": context_elements,
+        "explainability": explainability,
         "error": None,
     }

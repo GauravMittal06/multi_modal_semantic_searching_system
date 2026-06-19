@@ -92,34 +92,30 @@ def build_relationship_graph(elements: List[Dict[str, Any]]) -> nx.DiGraph:
         tables_in_section = [e for e in section_elems if e["type"] == "table"]
         images_in_section = [e for e in section_elems if e["type"] == "image"]
 
-        # Link all tables in a section to each other
-        for i, t1 in enumerate(tables_in_section):
-            for t2 in tables_in_section[i+1:]:
-                G.add_edge(t1["id"], t2["id"], relation="related_table")
-                if t2["id"] not in t1["related_elements"]:
-                    t1["related_elements"].append(t2["id"])
+        # Link tables in a section to each other — only if section is small,
+        # to avoid blanket-connecting every table under a broad heading
+        MAX_SECTION_FANOUT = 4
+        if len(tables_in_section) <= MAX_SECTION_FANOUT:
+            for i, t1 in enumerate(tables_in_section):
+                for t2 in tables_in_section[i+1:]:
+                    G.add_edge(t1["id"], t2["id"], relation="related_table")
+                    if t2["id"] not in t1["related_elements"]:
+                        t1["related_elements"].append(t2["id"])
 
-        # Link tables ↔ images in same section
-        for table in tables_in_section:
-            for image in images_in_section:
-                G.add_edge(table["id"], image["id"], relation="visualizes")
-                if image["id"] not in table["related_elements"]:
-                    table["related_elements"].append(image["id"])
-
-        # Link paragraphs in section to images in same section (cross-page)
-        paragraphs_in_section = [e for e in section_elems if e["type"] == "paragraph"]
-        for para in paragraphs_in_section:
+        # Link tables ↔ images in same section — only if section is small
+        if len(tables_in_section) <= MAX_SECTION_FANOUT and len(images_in_section) <= MAX_SECTION_FANOUT:
             for table in tables_in_section:
-                if table["id"] not in para["related_elements"]:
-                    para["related_elements"].append(table["id"])
-                if para["id"] not in table["related_elements"]:
-                    table["related_elements"].append(para["id"])
-            for image in images_in_section:
-                if image["id"] not in para["related_elements"]:
-                    para["related_elements"].append(image["id"])
-                if para["id"] not in image["related_elements"]:
-                    image["related_elements"].append(para["id"])
+                for image in images_in_section:
+                    G.add_edge(table["id"], image["id"], relation="visualizes")
+                    if image["id"] not in table["related_elements"]:
+                        table["related_elements"].append(image["id"])
 
+        # removed blanket paragraph -> every table/image in section linking.
+        # Same-page linking (done earlier in this function, per-page) already
+        # covers genuine proximity-based paragraph<->table/image relationships.
+        # Cross-page section-wide linking was producing excessive, low-precision
+        # related_elements lists once section_heading stopped being a useless
+        # constant (see extractor.py fix).
     return G
 
 

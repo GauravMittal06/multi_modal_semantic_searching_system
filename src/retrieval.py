@@ -61,8 +61,7 @@ def retrieve_context(
     def _rerank_score(hit):
         base = hit.get("score", 0.0)
         type_mult = TYPE_WEIGHT.get(hit.get("type", "paragraph"), 1.00)
-        if hit.get("metadata", {}).get("is_page_render", False):
-            type_mult *= 0.85
+        # Removed the is_page_render penalty so we don't drop charts
         return base * type_mult
 
     primary_hits.sort(key=_rerank_score, reverse=True)
@@ -102,7 +101,7 @@ def retrieve_context(
             # Always include tables from pages already in context
             # For off-page tables, require minimum relevance score
             hit_page = hit.get("page_number")
-            if hit_page not in covered_pages and reranked < 0.35:
+            if hit_page not in covered_pages and reranked < 0.45:
                 continue
             seen_ids.add(eid)
             hit["is_primary"] = True
@@ -112,7 +111,7 @@ def retrieve_context(
     # ── Forced image fetch — skip low-score images on focused queries ─────────
     image_hits = search_elements(
         query_vector=q_vec,
-        k=3,
+        k=10,  # Increased search radius from 3 to 10
         source_document=source_document,
         element_types=["image"],
     )
@@ -120,9 +119,8 @@ def retrieve_context(
         eid = hit.get("element_id", "")
         if eid and eid not in seen_ids:
             reranked = _rerank_score(hit)
-            if is_focused_query and reranked < 0.30:
-                continue
-            if not is_focused_query and reranked < 0.20:
+            # Lowered flat threshold so charts survive the cut
+            if reranked < 0.15:
                 continue
             seen_ids.add(eid)
             hit["is_primary"] = True
@@ -133,12 +131,12 @@ def retrieve_context(
         return context_elements
 
     # ── Related expansion: cap per primary hit, skip headings ────────────────
-    MAX_RELATED_PER_HIT = 3
+    MAX_RELATED_PER_HIT = 5
     related_ids_to_fetch = []
 
     for hit in primary_hits:
-        if hit.get("type") == "heading":
-            continue
+        # if hit.get("type") == "heading":
+            # continue
         added_for_this_hit = 0
         for rel_id in hit.get("related_elements", []):
             if added_for_this_hit >= MAX_RELATED_PER_HIT:
@@ -148,13 +146,15 @@ def retrieve_context(
                 seen_ids.add(rel_id)
                 added_for_this_hit += 1
 
-    related_ids_to_fetch = related_ids_to_fetch[:20]
+    related_ids_to_fetch = related_ids_to_fetch[:12]
 
     print(f"[retrieval] related_ids_to_fetch count: {len(related_ids_to_fetch)}")
 
     if related_ids_to_fetch:
         related_hits = fetch_elements_by_ids(related_ids_to_fetch)
         print(f"[retrieval] related_hits returned: {len(related_hits)}")
+        primary_pages = set(h.get("page_number") for h in primary_hits)
+        primary_sections = set(h.get("section_heading", "") for h in primary_hits if h.get("section_heading"))
         for hit in related_hits:
             print(
                 f"  -> type={hit.get('type')} | "
@@ -162,6 +162,11 @@ def retrieve_context(
                 f"section={hit.get('section_heading','')}"
             )
             if hit.get("type") == "heading":
+                continue
+            # Drop related elements from totally unrelated pages AND sections
+            hit_page = hit.get("page_number")
+            hit_section = hit.get("section_heading", "")
+            if hit_page not in primary_pages and hit_section not in primary_sections:
                 continue
             hit["is_primary"] = False
             hit["score"] = 0.0
@@ -276,7 +281,7 @@ def build_citations(context_elements: List[Dict[str, Any]]) -> List[Dict[str, An
         section = elem.get("section_heading", "")
         source = elem.get("source_document", "")
 
-        key = f"{source}|{page}|{elem_type}"
+        key = f"{source}|{page}|{elem_type}|{elem.get('element_id', '')}"
         if key in seen:
             continue
         seen.add(key)
@@ -299,3 +304,118 @@ def build_citations(context_elements: List[Dict[str, Any]]) -> List[Dict[str, An
     print("========================================\n")
 
     return citations
+
+
+def _humanize_relation(type_a: str, type_b: str) -> Optional[str]:
+    pair = {type_a, type_b}
+    if pair == {"paragraph", "table"}:
+        return "Paragraph explains Table"
+    if pair == {"paragraph", "image"}:
+        return "Paragraph references Image"
+    if pair == {"table", "image"}:
+        return "Image visualizes Table data"
+    if pair == {"table"} and type_a == type_b == "table":
+        return "Related tables connected by topic"
+    return None
+
+
+def build_explainability(
+    context_elements: List[Dict[str, Any]],
+    citations: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Judge-friendly, non-technical summary of how the answer was formed.
+    No scores, IDs, or vector metadata — only type/page/section level info.
+    """
+    _seen_evidence_keys = set()
+    evidence = []
+    for e in context_elements:
+        if e.get("type") == "heading":
+            continue
+        if not ((e.get("content") or "").strip() or (e.get("vision_summary") or "").strip()):
+            continue
+        # Dedup by element_id when available, falling back to a content-based
+        # key when element_id is missing/empty so duplicate payloads from
+        # upstream retrieval don't get double-counted in the evidence panel.
+        eid = e.get("element_id", "")
+        dedup_key = eid if eid else f"{e.get('source_document','')}|{e.get('page_number','')}|{e.get('type','')}|{(e.get('content') or e.get('vision_summary') or '')[:120]}"
+        if dedup_key in _seen_evidence_keys:
+            continue
+        _seen_evidence_keys.add(dedup_key)
+        evidence.append(e)
+
+    evidence_used = [
+        {
+            "type": e.get("type", "unknown").capitalize(),
+            "page_number": e.get("page_number", "?"),
+            "section_heading": e.get("section_heading", ""),
+        }
+        for e in evidence
+    ]
+
+    # ── Relationships used (human-readable, derived from shared section) ──────
+    relationships_used: List[str] = []
+    seen_rel = set()
+    for i, a in enumerate(evidence):
+        for b in evidence[i + 1:]:
+            if a.get("section_heading") and a.get("section_heading") == b.get("section_heading"):
+                label = _humanize_relation(a.get("type", ""), b.get("type", ""))
+                if label and label not in seen_rel:
+                    seen_rel.add(label)
+                    relationships_used.append(label)
+
+            for para, img in ((a, b), (b, a)):
+                if para.get("type") == "paragraph" and img.get("type") == "image":
+                    content = (para.get("content") or "").lower()
+                    if len(content.split()) <= 15 and any(
+                        k in content for k in ["figure", "fig.", "chart", "table"]
+                    ):
+                        label = "Caption supports Image"
+                        if label not in seen_rel:
+                            seen_rel.add(label)
+                            relationships_used.append(label)
+
+    relationships_used = relationships_used[:6]
+
+    # ── Modalities used ────────────────────────────────────────────────────────
+    types_present = set(e.get("type") for e in evidence)
+    modalities_used = {
+        "text": "paragraph" in types_present,
+        "table": "table" in types_present,
+        "image": "image" in types_present,
+    }
+
+    # ── Retrieval summary ──────────────────────────────────────────────────────
+    pages = set(e.get("page_number") for e in evidence)
+    type_counts: Dict[str, int] = {}
+    for e in evidence:
+        t = e.get("type", "unknown")
+        type_counts[t] = type_counts.get(t, 0) + 1
+
+    retrieval_summary = {
+        "total_elements": len(evidence),
+        "page_count": len(pages),
+        "type_counts": type_counts,
+    }
+
+    # ── Confidence ──────────────────────────────────────────────────────────────
+    modality_count = sum(1 for v in modalities_used.values() if v)
+    n = len(evidence)
+    avg_score = sum(
+        e.get("reranked_score", 0.0) for e in context_elements if e.get("is_primary")
+    ) / max(sum(1 for e in context_elements if e.get("is_primary")), 1)
+
+    if n >= 4 and modality_count >= 2 and citations and avg_score >= 0.45:
+        confidence = "High"
+    elif n >= 2 and avg_score >= 0.30:
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+
+    return {
+        "evidence_used": evidence_used,
+        "relationships_used": relationships_used,
+        "modalities_used": modalities_used,
+        "retrieval_summary": retrieval_summary,
+        "confidence": confidence,
+    }
