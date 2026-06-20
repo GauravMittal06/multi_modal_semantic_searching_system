@@ -414,19 +414,67 @@ def modality_contribution_summary(
     return contributions
 
 
+# Dark-theme palette for the premium graph presentation. Node/edge type
+# colors (TYPE_COLOR) stay the same hues so the legend in app.py still
+# matches — only the canvas, fonts, and chrome around them go dark.
+DARK_BG = "#0F1117"
+DARK_FONT = "#E6E6E6"
+DARK_EDGE_DIM = "#3A3F4B"
+ACCENT_GOLD = "#E8B339"
+
+
+def _short_label(text: str, max_chars: int = 18) -> str:
+    """Tighter on-canvas truncation than _truncate_label — node labels need
+    to stay short enough to not overlap neighboring nodes at default zoom.
+    Full text is preserved separately in the hover tooltip, so nothing is
+    actually lost, just deferred to hover."""
+    text = (text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars].rsplit(" ", 1)[0]
+    return (cut or text[:max_chars]).rstrip(",.;:—-") + "…"
+
+
+def _tooltip_html(elem: Dict[str, Any], full_label: str) -> str:
+    """Builds the hover tooltip shown on a node. vis-network renders the
+    `title` field as plain escaped text by default (not HTML), so this
+    returns a simple multi-line string — the full, untruncated label plus
+    type and page — instead of HTML markup that would otherwise show up
+    as literal tags in the tooltip."""
+    etype = (elem.get("type") or "unknown").capitalize()
+    page = elem.get("page_number", "?")
+    body = (elem.get("content") or elem.get("vision_summary") or "").strip().replace("\n", " ")
+    if len(body) > 220:
+        body = body[:220].rsplit(" ", 1)[0] + "…"
+    lines = [full_label, f"{etype} · Page {page}"]
+    if body:
+        lines.append(body)
+    return "\n".join(lines)
+
+
 def render_pyvis_html(
     graph: nx.DiGraph,
     elem_by_id: Dict[str, Dict[str, Any]],
     highlight_ids: List[str] = None,
-    height: str = "500px",
+    height: str = "560px",
     physics: bool = True,
     max_nodes: int = 300,
 ) -> Tuple[str, Dict[str, int]]:
     """
-    Renders a NetworkX graph as a self-contained pyvis HTML string, suitable
-    for st.components.v1.html(). highlight_ids (e.g. the primary evidence
-    elements) are drawn larger with a border so they stand out from neighbor
-    context nodes in the per-answer view.
+    Renders a NetworkX graph as a self-contained, dark-theme pyvis HTML
+    string, suitable for st.components.v1.html(). highlight_ids (e.g. the
+    primary evidence elements) are drawn larger with a gold border so they
+    stand out from neighbor context nodes in the per-answer view.
+
+    Visual design goals (premium product feel, not an engineering tool):
+      - Dark canvas matching a dark app theme, not a white debug-tool box.
+      - Generous node spacing and a stronger repulsion layout to minimize
+        label overlap at default zoom.
+      - Short on-canvas labels with full text deferred to a styled HTML
+        hover tooltip, so density never sacrifices readability.
+      - Evidence-path nodes/edges rendered in a bright gold accent so the
+        "answer path" is visually obvious within seconds, with everything
+        else dimmed to a supporting role.
 
     Large graphs (full-document view on 500–2000+ element documents) are
     capped at max_nodes: force-directed physics layout becomes unreadable
@@ -479,56 +527,74 @@ def render_pyvis_html(
         height=height,
         width="100%",
         directed=True,
-        bgcolor="#ffffff",
-        font_color="#1a1a1a",
+        bgcolor=DARK_BG,
+        font_color=DARK_FONT,
     )
 
     precomputed_pos = None
     if not use_physics:
         # Server-side static layout — computed once with networkx instead of
         # simulated frame-by-frame in the browser. spring_layout is fine up
-        # to a few hundred nodes (our post-cap ceiling).
+        # to a few hundred nodes (our post-cap ceiling). A larger k spreads
+        # nodes further apart to reduce label overlap in the static case.
         try:
-            precomputed_pos = nx.spring_layout(render_graph, seed=42, k=None)
+            precomputed_pos = nx.spring_layout(render_graph, seed=42, k=1.4)
         except Exception:
             precomputed_pos = None
         net.toggle_physics(False)
     else:
-        net.barnes_hut(spring_length=160, spring_strength=0.02, damping=0.85)
+        # Wider spring_length + stronger repulsion than the previous
+        # defaults: this is the single biggest lever for reducing node and
+        # label overlap in the force-directed (small, per-answer) graphs.
+        net.barnes_hut(
+            spring_length=260,
+            spring_strength=0.012,
+            damping=0.8,
+            gravity=-3200,
+            central_gravity=0.25,
+            overlap=0.1,
+        )
 
-    SCALE = 600  # spring_layout coords are roughly [-1, 1]; scale up for pixel space
+    SCALE = 700  # spring_layout coords are roughly [-1, 1]; scale up for pixel space
 
     for node_id in render_graph.nodes:
         elem = elem_by_id.get(node_id, {})
         etype = elem.get("type", "unknown")
         is_hl = node_id in highlight_ids
         base_color = TYPE_COLOR.get(etype, "#999999")
+        full_label = _node_label(elem, elem_by_id) if elem else node_id[:8]
         node_kwargs = dict(
-            label=_node_label(elem, elem_by_id) if elem else node_id[:8],
-            title=(elem.get("content") or elem.get("vision_summary") or "")[:400],
+            label=_short_label(full_label),
+            title=_tooltip_html(elem, full_label) if elem else full_label,
             shape=TYPE_SHAPE.get(etype, "dot"),
         )
         if is_hl:
-            # Evidence nodes: larger, thicker border, accent color (a
-            # distinct gold border reads as "this is the answer path"
-            # regardless of the node's type color) — Task 2.
+            # Evidence nodes: larger, thicker gold border — the "answer
+            # path" should be unmistakable at a glance, regardless of the
+            # node's underlying type color.
             node_kwargs.update(
-                color={"background": base_color, "border": "#D4A017", "highlight": {"background": base_color, "border": "#D4A017"}},
-                size=34,
+                color={
+                    "background": base_color,
+                    "border": ACCENT_GOLD,
+                    "highlight": {"background": base_color, "border": ACCENT_GOLD},
+                },
+                size=38,
                 borderWidth=4,
                 borderWidthSelected=5,
-                font={"size": 14, "bold": True},
+                font={"size": 15, "bold": True, "color": "#FFFFFF", "strokeWidth": 3, "strokeColor": DARK_BG},
                 opacity=1.0,
             )
         else:
             # Neighbor context nodes: smaller, thinner border, lower
-            # opacity — visually recede behind the evidence path.
+            # opacity — visually recede behind the evidence path so the
+            # gold path reads first.
             node_kwargs.update(
-                color=base_color,
-                size=14,
+                color={"background": base_color, "border": "#2A2D36"},
+                size=16,
                 borderWidth=1,
                 borderWidthSelected=3,
-                opacity=0.55,
+                opacity=0.65,
+                font={"size": 11, "color": "#B8BCC4", "strokeWidth": 2, "strokeColor": DARK_BG},
             )
         if precomputed_pos is not None and node_id in precomputed_pos:
             x, y = precomputed_pos[node_id]
@@ -540,25 +606,50 @@ def render_pyvis_html(
     for src, dst, data in render_graph.edges(data=True):
         relation = data.get("relation", "related")
         # Edges where both endpoints are evidence are part of the answer
-        # path — draw them heavier and solid. Edges touching only a
-        # neighbor recede, matching the node opacity treatment above.
+        # path — draw them heavier, solid gold. Edges touching only a
+        # neighbor recede into a dim, low-opacity dark-theme gray.
         both_evidence = src in highlight_ids and dst in highlight_ids
         edge_kwargs = dict(
             label=RELATION_LABEL.get(relation, relation),
             arrows="to",
-            font={"size": 11 if both_evidence else 9, "align": "middle"},
+            font={
+                "size": 12 if both_evidence else 9,
+                "align": "top",
+                "color": ACCENT_GOLD if both_evidence else "#7A7F8C",
+                "strokeWidth": 3,
+                "strokeColor": DARK_BG,
+            },
+            smooth={"type": "continuous", "roundness": 0.2},
         )
         if both_evidence:
-            edge_kwargs.update(color={"color": "#D4A017", "opacity": 1.0}, width=2.5)
+            edge_kwargs.update(color={"color": ACCENT_GOLD, "opacity": 1.0}, width=3)
         else:
-            edge_kwargs.update(color={"color": "#bbbbbb", "opacity": 0.5}, width=1)
+            edge_kwargs.update(color={"color": DARK_EDGE_DIM, "opacity": 0.6}, width=1)
         net.add_edge(src, dst, **edge_kwargs)
 
     net.set_options(("""
     {
-      "edges": {"font": {"size": 10, "align": "middle"}, "smooth": {"type": "continuous"}},
-      "nodes": {"font": {"size": 12}},
-      "interaction": {"hover": true, "tooltipDelay": 100}"""
+      "edges": {
+        "font": {"size": 10, "align": "top"},
+        "smooth": {"type": "continuous", "roundness": 0.2},
+        "selectionWidth": 2
+      },
+      "nodes": {
+        "font": {"face": "Inter, -apple-system, sans-serif"},
+        "shadow": {"enabled": true, "color": "rgba(0,0,0,0.4)", "size": 8, "x": 0, "y": 2}
+      },
+      "interaction": {
+        "hover": true,
+        "tooltipDelay": 80,
+        "zoomView": true,
+        "dragView": true,
+        "navigationButtons": true,
+        "keyboard": {"enabled": false}
+      },
+      "physics": {
+        "barnesHut": {"avoidOverlap": 0.6}
+      },
+      "layout": {"improvedLayout": true}"""
       + (", \"physics\": {\"enabled\": false}" if not use_physics else "")
       + """
     }
@@ -580,6 +671,18 @@ def render_pyvis_html(
             os.unlink(tmp_path)
         except OSError:
             pass
+
+    # pyvis's generated HTML wraps the network in a plain white-bordered
+    # <div id="mynetwork">...</div> regardless of bgcolor — patch in a dark
+    # card wrapper (rounded corners, subtle border, no white edge bleed) so
+    # the canvas reads as an intentional product surface, not a raw embed.
+    html = html.replace(
+        "<body>",
+        f"<body style=\"margin:0;background:{DARK_BG};\">"
+        f"<div style=\"border-radius:14px;overflow:hidden;border:1px solid #262A33;"
+        f"box-shadow:0 4px 24px rgba(0,0,0,0.35);\">",
+        1,
+    ).replace("</body>", "</div></body>", 1)
 
     render_info = {
         "shown_nodes": shown_nodes,

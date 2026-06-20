@@ -82,6 +82,20 @@ QUESTION: {question}
 
 ANSWER:"""
 
+    # ===== STAGE_F_PROBE: confirm whether Priority 2 reached the prompt, print raw prompt =====
+    _priority2_in_prompt = "Priority 2" in formatted_context
+    print(f"\n[STAGE_F_PROBE] Priority 2 present in formatted_context fed to prompt? -> {_priority2_in_prompt}")
+    if _priority2_in_prompt:
+        _idx = formatted_context.find("Priority 2")
+        _snippet_start = max(0, _idx - 50)
+        _snippet_end = min(len(formatted_context), _idx + 400)
+        print("[STAGE_F_PROBE] ===== formatted_context SNIPPET CONTAINING 'Priority 2' =====")
+        print(formatted_context[_snippet_start:_snippet_end])
+        print("[STAGE_F_PROBE] ===== END SNIPPET =====\n")
+    print("[STAGE_F_PROBE] ===== RAW PROMPT SENT TO GEMINI =====")
+    print(prompt)
+    print("[STAGE_F_PROBE] ===== END RAW PROMPT =====\n")
+
     # Step 4: Generate with Gemini
     try:
         from google import genai
@@ -91,6 +105,10 @@ ANSWER:"""
             contents=prompt,
         )
         answer = response.text or "No answer generated."
+        # ===== STAGE_F_PROBE: raw Gemini response, unmodified =====
+        print("[STAGE_F_PROBE] ===== RAW GEMINI RESPONSE (response.text) =====")
+        print(repr(answer))
+        print("[STAGE_F_PROBE] ===== END RAW GEMINI RESPONSE =====\n")
     except Exception as e:
         fallback_citations = build_citations(context_elements, answer_text="")
         fallback_explainability = build_explainability(context_elements, fallback_citations, answer_text="")

@@ -61,7 +61,7 @@ def retrieve_context(
     print(f"[retrieval] Searching with source_document filter: '{source_document}'")
     primary_hits = search_elements(
         query_vector=q_vec,
-        k=40,
+        k=100,
         source_document=source_document,
     )
     print(f"[retrieval] primary_hits count: {len(primary_hits)}")
@@ -74,6 +74,42 @@ def retrieve_context(
             f"section={hit.get('section_heading', '')}"
         )
     print("==================================\n")
+
+    # ===== STAGE_C_PRIME_PROBE: did the raw k=40 ANN search even return Priority 2? =====
+    _p2_in_raw_40 = any(
+        "Priority 2" in (h.get("content") or h.get("vision_summary") or "")
+        for h in primary_hits
+    )
+    print(f"\n[STAGE_C_PRIME_PROBE] IS PRIORITY 2 IN RAW k=40 VECTOR SEARCH RESULT? -> {_p2_in_raw_40}")
+    if not _p2_in_raw_40:
+        print("[STAGE_C_PRIME_PROBE] Priority 2 absent from raw ANN top-40. Running a wider")
+        print("[STAGE_C_PRIME_PROBE] k=200 search on the SAME query_vector to find its actual rank...")
+        try:
+            _wider_hits = search_elements(
+                query_vector=q_vec,
+                k=200,
+                source_document=source_document,
+            )
+            _p2_rank_in_wider = None
+            for _idx, _h in enumerate(_wider_hits):
+                if "Priority 2" in (_h.get("content") or _h.get("vision_summary") or ""):
+                    _p2_rank_in_wider = _idx
+                    _p2_vector_score = _h.get("score", None)
+                    break
+            if _p2_rank_in_wider is not None:
+                print(f"[STAGE_C_PRIME_PROBE] Priority 2 found at rank={_p2_rank_in_wider} (0-indexed) out of {len(_wider_hits)} "
+                      f"in k=200 search. vector_score={_p2_vector_score}")
+                print(f"[STAGE_C_PRIME_PROBE] CONCLUSION: Priority 2 exists in Qdrant and is reachable by vector search,")
+                print(f"[STAGE_C_PRIME_PROBE] but its cosine similarity to this query ranks it OUTSIDE the k=40 cutoff")
+                print(f"[STAGE_C_PRIME_PROBE] (rank {_p2_rank_in_wider} >= 40). ROOT CAUSE: embedding/ANN relevance ranking,")
+                print(f"[STAGE_C_PRIME_PROBE] not truncation, not section boost, not attribution.")
+            else:
+                print(f"[STAGE_C_PRIME_PROBE] Priority 2 NOT found even in k=200 ({len(_wider_hits)} hits returned).")
+                print(f"[STAGE_C_PRIME_PROBE] Either k=200 still isn't wide enough, or source_document filter")
+                print(f"[STAGE_C_PRIME_PROBE] is excluding it. Compare against Stage B's known element_id directly.")
+        except Exception as _e:
+            print(f"[STAGE_C_PRIME_PROBE] Wider search failed: {_e}")
+    print("[STAGE_C_PRIME_PROBE] ===== END =====\n")
 
     if not primary_hits:
         print("[retrieval] No hits with filter — trying unfiltered search to diagnose...")
@@ -132,6 +168,28 @@ def retrieve_context(
                 )
 
     # ── Section-intent boost ───────────────────────────────────────
+    # ===== STAGE_C_PROBE: dump every primary_hit BEFORE boosting =====
+    print("\n[STAGE_C_PROBE] ===== ALL PRIMARY_HITS BEFORE SECTION BOOST =====")
+    for i, hit in enumerate(primary_hits):
+        _content_preview = (hit.get("content") or hit.get("vision_summary") or "")[:200]
+        print(
+            f"[STAGE_C_PROBE] idx={i} "
+            f"element_id={hit.get('element_id')} "
+            f"page={hit.get('page_number')} "
+            f"type={hit.get('type')} "
+            f"section_heading={hit.get('section_heading')!r} "
+            f"reranked_score={hit.get('reranked_score', 0.0):.3f} "
+            f"contains_priority2={'Priority 2' in _content_preview} "
+            f"contains_400M={'400M' in _content_preview or '$400M' in _content_preview} "
+            f"contains_mumbai={'Mumbai' in _content_preview} "
+            f"contains_hyderabad={'Hyderabad' in _content_preview} "
+            f"contains_60pct={'60%' in _content_preview}"
+        )
+        print(f"[STAGE_C_PROBE]   content_preview={_content_preview!r}")
+    print("[STAGE_C_PROBE] ===== END PRE-BOOST DUMP =====\n")
+
+    matched_in_section = []  # STAGE_C_PROBE: explicit set asked for by investigation
+
     if section_intent:
         section_target = section_intent["section"].lower()
 
@@ -142,12 +200,31 @@ def retrieve_context(
 
             if section_target in section_heading or section_heading in section_target:
                 hit["reranked_score"] += SECTION_BOOST
+                matched_in_section.append(hit)  # STAGE_C_PROBE
 
                 print(
                     f"[retrieval] Boosted section match "
                     f"page={hit.get('page_number')} "
                     f"section={hit.get('section_heading')}"
                 )
+
+    # ===== STAGE_C_PROBE: dump matched_in_section explicitly =====
+    print(f"\n[STAGE_C_PROBE] ===== matched_in_section (count={len(matched_in_section)}) =====")
+    for hit in matched_in_section:
+        _content_preview = (hit.get("content") or hit.get("vision_summary") or "")[:200]
+        print(
+            f"[STAGE_C_PROBE] page={hit.get('page_number')} "
+            f"section_heading={hit.get('section_heading')!r} "
+            f"reranked_score={hit.get('reranked_score', 0.0):.3f} "
+            f"element_id={hit.get('element_id')}"
+        )
+        print(f"[STAGE_C_PROBE]   content_preview={_content_preview!r}")
+    _priority2_in_matched = any(
+        "Priority 2" in (h.get("content") or h.get("vision_summary") or "")
+        for h in matched_in_section
+    )
+    print(f"[STAGE_C_PROBE] IS PRIORITY 2 IN matched_in_section? -> {_priority2_in_matched}")
+    print("[STAGE_C_PROBE] ===== END matched_in_section DUMP =====\n")
 
     primary_hits.sort(key=lambda h: h["reranked_score"], reverse=True)
     print("\n===== TOP 20 AFTER RERANK =====")
@@ -163,8 +240,75 @@ def retrieve_context(
         print(
             (hit.get("content") or hit.get("vision_summary") or "")[:150]
         )
+
+    # ===== STAGE_D_PROBE: full candidate list, scores, rank, BEFORE truncation =====
+    print(f"\n[STAGE_D_PROBE] ===== ALL CANDIDATES BEFORE primary_hits[:8] (total={len(primary_hits)}) =====")
+    for rank, hit in enumerate(primary_hits):
+        _content_preview = (hit.get("content") or hit.get("vision_summary") or "")[:200]
+        _has_p2 = "Priority 2" in _content_preview
+        print(
+            f"[STAGE_D_PROBE] rank={rank} "
+            f"element_id={hit.get('element_id')} "
+            f"page={hit.get('page_number')} "
+            f"section_heading={hit.get('section_heading')!r} "
+            f"reranked_score={hit.get('reranked_score', 0.0):.3f} "
+            f"survives_top8={rank < 8} "
+            f"contains_priority2={_has_p2}"
+        )
+    print("[STAGE_D_PROBE] ===== END PRE-TRUNCATION DUMP =====\n")
+
     expanded_seed_hits = primary_hits[:15]
     primary_hits = primary_hits[:8]
+
+    # ===== SECTION_SURVIVAL_PATCH =====
+    # Guarantee: when a section-intent query is detected, every element that
+    # matched that section (matched_in_section, built above) must survive the
+    # global top-8 cap, regardless of where it landed in the cross-encoder
+    # tie-break within the section. The flat SECTION_BOOST cannot resolve
+    # ranking WITHIN a section — it only beats out non-section content — so
+    # without this, a section with more matches than fit in 8 slots can lose
+    # arbitrary members to truncation even though they all received the boost.
+    if section_intent:
+        _existing_ids_after_truncation = {h.get("element_id", "") for h in primary_hits}
+        _added_by_patch = []
+        for h in matched_in_section:
+            eid = h.get("element_id", "")
+            if eid not in _existing_ids_after_truncation:
+                primary_hits.append(h)
+                _existing_ids_after_truncation.add(eid)
+                _added_by_patch.append(h)
+
+        print(f"\n[SECTION_SURVIVAL_PATCH] section_intent detected — re-added {len(_added_by_patch)} element(s) dropped by primary_hits[:8]")
+        for h in _added_by_patch:
+            _content_preview = (h.get("content") or h.get("vision_summary") or "")[:200]
+            print(
+                f"[SECTION_SURVIVAL_PATCH]   re-added element_id={h.get('element_id')} "
+                f"page={h.get('page_number')} "
+                f"section_heading={h.get('section_heading')!r} "
+                f"reranked_score={h.get('reranked_score', 0.0):.3f}"
+            )
+            print(f"[SECTION_SURVIVAL_PATCH]     content_preview={_content_preview!r}")
+        print(f"[SECTION_SURVIVAL_PATCH] primary_hits count after patch: {len(primary_hits)}")
+        print("[SECTION_SURVIVAL_PATCH] ===== END PATCH LOG =====\n")
+    # ===== END SECTION_SURVIVAL_PATCH =====
+
+    # ===== STAGE_D_PROBE: surviving hits AFTER truncation =====
+    print(f"\n[STAGE_D_PROBE] ===== SURVIVING primary_hits[:8] (count={len(primary_hits)}) =====")
+    for rank, hit in enumerate(primary_hits):
+        _content_preview = (hit.get("content") or hit.get("vision_summary") or "")[:200]
+        print(
+            f"[STAGE_D_PROBE] rank={rank} "
+            f"element_id={hit.get('element_id')} "
+            f"page={hit.get('page_number')} "
+            f"section_heading={hit.get('section_heading')!r} "
+            f"reranked_score={hit.get('reranked_score', 0.0):.3f}"
+        )
+    _priority2_survived_truncation = any(
+        "Priority 2" in (h.get("content") or h.get("vision_summary") or "")
+        for h in primary_hits
+    )
+    print(f"[STAGE_D_PROBE] DID PRIORITY 2 SURVIVE primary_hits[:8]? -> {_priority2_survived_truncation}")
+    print("[STAGE_D_PROBE] ===== END SURVIVING DUMP =====\n")
 
     seen_ids = set()
     context_elements = []
@@ -386,6 +530,26 @@ def retrieve_context(
 
     print("==========================================\n")
 
+    # ===== STAGE_D_PROBE / STAGE_E entry point: final return value of retrieve_context() =====
+    print(f"\n[STAGE_RETURN_PROBE] ===== FINAL context_elements RETURNED (count={len(balanced)}) =====")
+    for elem in balanced:
+        _content_preview = (elem.get("content") or elem.get("vision_summary") or "")[:200]
+        print(
+            f"[STAGE_RETURN_PROBE] element_id={elem.get('element_id')} "
+            f"page={elem.get('page_number')} "
+            f"type={elem.get('type')} "
+            f"is_primary={elem.get('is_primary')} "
+            f"section_heading={elem.get('section_heading')!r} "
+            f"reranked_score={elem.get('reranked_score', 0.0):.3f} "
+            f"contains_priority2={'Priority 2' in _content_preview}"
+        )
+    _priority2_in_final_return = any(
+        "Priority 2" in (e.get("content") or e.get("vision_summary") or "")
+        for e in balanced
+    )
+    print(f"[STAGE_RETURN_PROBE] IS PRIORITY 2 IN retrieve_context() RETURN VALUE? -> {_priority2_in_final_return}")
+    print("[STAGE_RETURN_PROBE] ===== END FINAL RETURN DUMP =====\n")
+
     return balanced
 
 def _extract_reference(query: str):
@@ -483,7 +647,18 @@ def format_context_for_llm(context_elements: List[Dict[str, Any]]) -> str:
         meta = f"Source: {source} | Page: {page} | Section: {section}"
         parts.append(f"{label}\n{meta}\n{content}")
 
-    return "\n\n---\n\n".join(parts)
+    final_context = "\n\n---\n\n".join(parts)
+
+    # ===== STAGE_E_PROBE: exact formatted_context string, searched for target evidence =====
+    print("\n[STAGE_E_PROBE] ===== EXACT formatted_context STRING =====")
+    print(final_context)
+    print("[STAGE_E_PROBE] ===== END formatted_context STRING =====\n")
+    print("[STAGE_E_PROBE] ===== SEARCH RESULTS IN formatted_context =====")
+    for needle in ["Priority 2", "$400M", "400M", "Mumbai", "Hyderabad", "60%"]:
+        print(f"[STAGE_E_PROBE] contains {needle!r}? -> {needle in final_context}")
+    print("[STAGE_E_PROBE] ===== END SEARCH RESULTS =====\n")
+
+    return final_context
 
 def build_citations(
     context_elements: List[Dict[str, Any]],
