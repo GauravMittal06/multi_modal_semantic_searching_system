@@ -71,6 +71,7 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
             sorted(all_sizes)[len(all_sizes) // 2] if all_sizes else 12,
             doc_median_font,
         )
+        _page_heading_start_idx = len(elements)
         for block in blocks:
             if block.get("type") != 0:
                 continue
@@ -147,6 +148,8 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
 
             if is_heading:
                 current_heading = block_text
+                _bbox = block.get("bbox", [0, 0, 0, 0])
+                block_y0 = _bbox[1]
 
                 elements.append(
                     _make_element(
@@ -155,8 +158,16 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                         page_num,
                         current_heading,
                         source_name,
-                        {"font_size": max_font_size},
+                        {"font_size": max_font_size, "y0": block_y0, "bbox": list(_bbox)},
                     )
+                )
+
+                # ===== PART_B_BBOX_PROBE =====
+                print(
+                    f"[PART_B_BBOX_PROBE] page={page_num} | "
+                    f"bbox=({_bbox[0]:.2f}, {_bbox[1]:.2f}, {_bbox[2]:.2f}, {_bbox[3]:.2f}) | "
+                    f"font_size={max_font_size:.2f} | "
+                    f"text={block_text!r}"
                 )
 
             else:
@@ -171,13 +182,82 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                             {},
                         )
                     )
+
+        # ===== PART_B: multiline heading reconstruction (this page only) =====
+        _FONT_TOL = 0.5
+        _GAP_MIN, _GAP_MAX = -5, 5
+        _TERMINAL_PUNCT = (".", ":", ";", ",", "?", "!")
+
+        _page_elements = elements[_page_heading_start_idx:]
+        _i = 0
+        while _i < len(_page_elements) - 1:
+            a = _page_elements[_i]
+            b = _page_elements[_i + 1]
+
+            if a["type"] != "heading" or b["type"] != "heading":
+                _i += 1
+                continue
+
+            a_bbox = a.get("metadata", {}).get("bbox")
+            b_bbox = b.get("metadata", {}).get("bbox")
+            a_fs = a.get("metadata", {}).get("font_size")
+            b_fs = b.get("metadata", {}).get("font_size")
+
+            if not a_bbox or not b_bbox or a_fs is None or b_fs is None:
+                _i += 1
+                continue
+
+            same_font = abs(a_fs - b_fs) <= _FONT_TOL
+            gap = b_bbox[1] - a_bbox[3]  # b.y0 - a.y1
+            gap_ok = _GAP_MIN <= gap <= _GAP_MAX
+            indented = b_bbox[0] > a_bbox[0]
+            no_term_punct = not a["content"].rstrip().endswith(_TERMINAL_PUNCT)
+
+            if same_font and gap_ok and indented and no_term_punct:
+                merged_text = f"{a['content']} {b['content']}"
+                print(f'[PART_B_MERGE] MERGED: "{a["content"]}" + "{b["content"]}" -> "{merged_text}"')
+
+                a["content"] = merged_text
+                a["section_heading"] = merged_text
+                a["metadata"]["bbox"] = [
+                    min(a_bbox[0], b_bbox[0]),
+                    a_bbox[1],
+                    max(a_bbox[2], b_bbox[2]),
+                    b_bbox[3],
+                ]
+                # y0 stays as a's original top position
+
+                # Remove b from the real elements list (it's a duplicate now)
+                elements.remove(b)
+                _page_elements.pop(_i + 1)
+
+                # If current_heading was set to b's standalone text, fix it forward
+                if current_heading == b["content"]:
+                    current_heading = merged_text
+
+                # Re-check the new a against the next element (don't advance _i)
+                continue
+            else:
+                if a["type"] == "heading" and b["type"] == "heading":
+                    print(
+                        f'[PART_B_MERGE] SKIPPED: "{a["content"]}" + "{b["content"]}" '
+                        f'| reason: '
+                        f'{"font mismatch " if not same_font else ""}'
+                        f'{"gap out of range (%.2f) " % gap if not gap_ok else ""}'
+                        f'{"not indented " if not indented else ""}'
+                        f'{"terminal punctuation " if not no_term_punct else ""}'
+                    )
+                _i += 1
+        # ===== END PART_B =====
+
     # --- Tables via pdfplumber ---
     try:
         import pdfplumber
         with pdfplumber.open(filepath) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
-                tables = page.extract_tables()
+                tables = page.find_tables()
                 for table in tables:
+                    table = table.extract() if hasattr(table, "extract") else table
                     if not table:
                         continue
                     # Convert table rows to markdown-style string
@@ -198,6 +278,7 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                                     all_cells.append(str(cell).strip().replace("$", "USD ").replace("%", " pct"))
                         semantic_tags = " | ".join(dict.fromkeys(all_cells[:12]))
                         table_text_with_hint = f"[TABLE COLUMNS: {header_hint_clean}]\n[KEY VALUES: {semantic_tags}]\n{table_text_clean}"
+                        _table_bbox = page.find_tables().tables[0].bbox if False else None  # placeholder removed below
                         elem = _make_element(
                             "table", table_text_with_hint, page_num,
                             _get_heading_for_page(elements, page_num),
@@ -232,15 +313,24 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                 image_path = os.path.join(images_dir, image_filename)
                 with open(image_path, "wb") as f:
                     f.write(image_bytes)
+                _img_y0 = img[7] if len(img) > 7 else None
+                # img tuple format from page.get_images(full=True) does not reliably
+                # include placement bbox; fetch actual placement rect explicitly.
+                try:
+                    _img_rects = page.get_image_rects(xref)
+                    _img_y0 = _img_rects[0].y0 if _img_rects else None
+                except Exception:
+                    _img_y0 = None
+
                 elem = {
                     "id": str(uuid.uuid4()),
                     "type": "image",
                     "content": "",
                     "page_number": page_num,
-                    "section_heading": _get_heading_for_page(elements, page_num),
+                    "section_heading": _get_heading_for_page(elements, page_num, target_y0=_img_y0),
                     "source_document": source_name,
                     "related_elements": [],
-                    "metadata": {"image_path": image_path, "image_filename": image_filename, "extension": image_ext},
+                    "metadata": {"image_path": image_path, "image_filename": image_filename, "extension": image_ext, "y0": _img_y0},
                     "vision_summary": "",
                     "keywords": [],
                 }
@@ -329,6 +419,40 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
             )
 
     print("=====================\n")
+
+    print("\n=== IMAGE SECTION ASSIGNMENT DEBUG (Part A validation) ===")
+
+    for e in elements:
+        if e["type"] != "image":
+            continue
+
+        page_num = e["page_number"]
+        img_y0 = e.get("metadata", {}).get("y0")
+
+        same_page_headings = [
+            h for h in elements
+            if h["type"] == "heading" and h["page_number"] == page_num
+        ]
+
+        print(
+            f"\nimage page={page_num} | "
+            f"assigned_section={e.get('section_heading')!r} | "
+            f"image_y0={img_y0}"
+        )
+        if not same_page_headings:
+            print(f"  (no headings on page {page_num})")
+        else:
+            for h in same_page_headings:
+                h_y0 = h.get("metadata", {}).get("y0")
+                above = (
+                    "ABOVE image" if (h_y0 is not None and img_y0 is not None and h_y0 <= img_y0)
+                    else "BELOW image" if (h_y0 is not None and img_y0 is not None)
+                    else "y0 unknown"
+                )
+                marker = " <-- ASSIGNED" if h["content"] == e.get("section_heading") else ""
+                print(f"  heading y0={h_y0} | {above} | {h['content']!r}{marker}")
+
+    print("=== END IMAGE SECTION ASSIGNMENT DEBUG ===\n")
 
     doc.close()
     return elements
@@ -471,23 +595,42 @@ def extract_document(filepath: str, source_name: str = None) -> List[Dict[str, A
     
 # ─── Internal helpers ─────────────────────────────────────────────────────────
 
-def _get_heading_for_page(elements: List[Dict], page_num: int) -> str:
+def _get_heading_for_page(elements: List[Dict], page_num: int, target_y0: float = None) -> str:
     """
-    Prefer a heading from the same page.
+    Prefer the nearest heading ABOVE this element on the same page, by y-position.
+    Falls back to the last heading on the page if no y-position is available
+    (preserves old behavior for any caller that doesn't pass target_y0).
     Otherwise only inherit a heading from a nearby page.
     """
 
     MAX_HEADING_LOOKBACK = 3
 
     page_headings = [
-        e["content"]
-        for e in elements
+        e for e in elements
         if e["type"] == "heading"
         and e["page_number"] == page_num
     ]
 
     if page_headings:
-        return page_headings[-1]
+        if target_y0 is not None:
+            # Headings with a known y0 that sit above (or at) the target element,
+            # i.e. they were rendered earlier vertically on the page.
+            candidates = [
+                h for h in page_headings
+                if h.get("metadata", {}).get("y0") is not None
+                and h["metadata"]["y0"] <= target_y0
+            ]
+            if candidates:
+                # Nearest above = largest y0 among those still <= target_y0
+                nearest = max(candidates, key=lambda h: h["metadata"]["y0"])
+                return nearest["content"]
+            # No heading above this element on the page (e.g. it's above all
+            # headings) — fall through to extraction-order-last as a safe default,
+            # same as old behavior, rather than silently returning "".
+            return page_headings[-1]["content"]
+
+        # No target_y0 provided by caller — preserve exact old behavior.
+        return page_headings[-1]["content"]
 
     closest_heading = ""
     closest_page = None

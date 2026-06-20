@@ -15,6 +15,7 @@ from src.extractor import extract_document
 from src.vision import enrich_image_elements
 from src.relationships import build_relationship_graph, summarize_graph
 from src.rag_core import embed_passages, upsert_elements, delete_by_source
+from src.bm25_index import build_bm25_index, delete_bm25_index
 
 def ingest_document(filepath: str, original_filename: str = None) -> Dict[str, Any]:
     source_name = original_filename if original_filename else os.path.basename(filepath)
@@ -48,9 +49,11 @@ def ingest_document(filepath: str, original_filename: str = None) -> Dict[str, A
     embeddings = embed_passages(texts_to_embed)
     print(f"       → {len(embeddings)} embeddings generated")
 
-    print("[5/5] Upserting to Qdrant...")
+    print("[5/5] Upserting to Qdrant and building BM25 index...")
     delete_by_source(source_name)
+    delete_bm25_index(source_name)
     upsert_elements(elements, embeddings)
+    build_bm25_index(elements, source_name)
 
     print(f"\n[ingest] ✅ Done: {source_name}")
     return {

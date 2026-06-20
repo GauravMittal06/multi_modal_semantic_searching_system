@@ -96,6 +96,11 @@ ANSWER:"""
     print(prompt)
     print("[STAGE_F_PROBE] ===== END RAW PROMPT =====\n")
 
+    print("[STAGE_F_PROBE] ===== SSP STRING CHECK IN FINAL PROMPT =====")
+    for needle in ["SSP1-1.9", "SSP5-8.5", "1.5°C", "1.6°C"]:
+        print(f"[STAGE_F_PROBE] prompt contains {needle!r}? -> {needle in prompt}")
+    print("[STAGE_F_PROBE] ===== END SSP STRING CHECK =====\n")
+
     # Step 4: Generate with Gemini
     try:
         from google import genai

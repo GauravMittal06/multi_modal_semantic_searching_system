@@ -86,7 +86,7 @@ def _ensure_collection(dim: int):
             )
 
     # Ensure payload indexes for filtering
-    for field in ["source_document", "type", "page_number", "section_heading", "element_id"]:
+    for field in ["source_document", "type", "section_heading", "element_id"]:
         try:
             _qdrant.create_payload_index(
                 collection_name=QDRANT_COLLECTION,
@@ -95,6 +95,14 @@ def _ensure_collection(dim: int):
             )
         except Exception:
             pass
+    try:
+        _qdrant.create_payload_index(
+            collection_name=QDRANT_COLLECTION,
+            field_name="page_number",
+            field_schema=qmodels.PayloadSchemaType.INTEGER,
+        )
+    except Exception:
+        pass
 
 
 # ─── Embedding ────────────────────────────────────────────────────────────────

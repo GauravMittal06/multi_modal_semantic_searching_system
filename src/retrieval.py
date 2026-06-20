@@ -10,9 +10,11 @@ from typing import List, Dict, Any, Optional
 try:
     from .rag_core import embed_query, search_elements, fetch_elements_by_ids, rerank_pairs
     from .graph_view import relationships_used_from_subgraph
+    from .hybrid_search import hybrid_search
 except ImportError:
     from rag_core import embed_query, search_elements, fetch_elements_by_ids, rerank_pairs
     from graph_view import relationships_used_from_subgraph
+    from hybrid_search import hybrid_search
 
 TABLE_THRESHOLD = -1.5
 IMAGE_THRESHOLD = -1.0
@@ -58,11 +60,14 @@ def retrieve_context(
         print("[retrieval] embed_query returned empty vector")
         return []
 
-    print(f"[retrieval] Searching with source_document filter: '{source_document}'")
-    primary_hits = search_elements(
+    print(f"[retrieval] Hybrid search with source_document filter: '{source_document}'")
+    primary_hits = hybrid_search(
+        question=question,
         query_vector=q_vec,
-        k=100,
         source_document=source_document,
+        dense_k=60,
+        bm25_k=60,
+        top_n=60,
     )
     print(f"[retrieval] primary_hits count: {len(primary_hits)}")
     print("\n========== PRIMARY HITS ==========")
@@ -75,41 +80,11 @@ def retrieve_context(
         )
     print("==================================\n")
 
-    # ===== STAGE_C_PRIME_PROBE: did the raw k=40 ANN search even return Priority 2? =====
-    _p2_in_raw_40 = any(
+    _p2_in_hybrid = any(
         "Priority 2" in (h.get("content") or h.get("vision_summary") or "")
         for h in primary_hits
     )
-    print(f"\n[STAGE_C_PRIME_PROBE] IS PRIORITY 2 IN RAW k=40 VECTOR SEARCH RESULT? -> {_p2_in_raw_40}")
-    if not _p2_in_raw_40:
-        print("[STAGE_C_PRIME_PROBE] Priority 2 absent from raw ANN top-40. Running a wider")
-        print("[STAGE_C_PRIME_PROBE] k=200 search on the SAME query_vector to find its actual rank...")
-        try:
-            _wider_hits = search_elements(
-                query_vector=q_vec,
-                k=200,
-                source_document=source_document,
-            )
-            _p2_rank_in_wider = None
-            for _idx, _h in enumerate(_wider_hits):
-                if "Priority 2" in (_h.get("content") or _h.get("vision_summary") or ""):
-                    _p2_rank_in_wider = _idx
-                    _p2_vector_score = _h.get("score", None)
-                    break
-            if _p2_rank_in_wider is not None:
-                print(f"[STAGE_C_PRIME_PROBE] Priority 2 found at rank={_p2_rank_in_wider} (0-indexed) out of {len(_wider_hits)} "
-                      f"in k=200 search. vector_score={_p2_vector_score}")
-                print(f"[STAGE_C_PRIME_PROBE] CONCLUSION: Priority 2 exists in Qdrant and is reachable by vector search,")
-                print(f"[STAGE_C_PRIME_PROBE] but its cosine similarity to this query ranks it OUTSIDE the k=40 cutoff")
-                print(f"[STAGE_C_PRIME_PROBE] (rank {_p2_rank_in_wider} >= 40). ROOT CAUSE: embedding/ANN relevance ranking,")
-                print(f"[STAGE_C_PRIME_PROBE] not truncation, not section boost, not attribution.")
-            else:
-                print(f"[STAGE_C_PRIME_PROBE] Priority 2 NOT found even in k=200 ({len(_wider_hits)} hits returned).")
-                print(f"[STAGE_C_PRIME_PROBE] Either k=200 still isn't wide enough, or source_document filter")
-                print(f"[STAGE_C_PRIME_PROBE] is excluding it. Compare against Stage B's known element_id directly.")
-        except Exception as _e:
-            print(f"[STAGE_C_PRIME_PROBE] Wider search failed: {_e}")
-    print("[STAGE_C_PRIME_PROBE] ===== END =====\n")
+    print(f"[hybrid_check] Priority 2 in hybrid top-60: {_p2_in_hybrid}")
 
     if not primary_hits:
         print("[retrieval] No hits with filter — trying unfiltered search to diagnose...")
@@ -131,10 +106,7 @@ def retrieve_context(
 
         vector_score = h.get("score", 0.0)
 
-        h["reranked_score"] = (
-            0.35 * vector_score
-            + 0.65 * s
-        )
+        h["reranked_score"] = s
 
         print(
             f"[fusion] "
@@ -342,12 +314,7 @@ def retrieve_context(
     for hit, reranked in zip(table_hits, table_scores):
 
         vector_score = hit.get("score", 0.0)
-
-        reranked = (
-            0.35 * vector_score
-            + 0.65 * reranked
-        )
-        cross_score = table_scores[table_hits.index(hit)]
+        cross_score = reranked
 
         print(
             f"[table-rank] "
@@ -548,6 +515,16 @@ def retrieve_context(
         for e in balanced
     )
     print(f"[STAGE_RETURN_PROBE] IS PRIORITY 2 IN retrieve_context() RETURN VALUE? -> {_priority2_in_final_return}")
+
+    _target_id = "48d10f0d-9dfa-4dde-aec8-c4812d1ba068"
+    _target_in_final = any(e.get("element_id") == _target_id for e in balanced)
+    print(f"[STAGE_RETURN_PROBE] IS 48d10f0d IN retrieve_context() RETURN VALUE? -> {_target_in_final}")
+    if _target_in_final:
+        _target_elem = next(e for e in balanced if e.get("element_id") == _target_id)
+        print(f"[STAGE_RETURN_PROBE] 48d10f0d details: is_primary={_target_elem.get('is_primary')} "
+              f"reranked_score={_target_elem.get('reranked_score', 0.0):.3f} "
+              f"type={_target_elem.get('type')} page={_target_elem.get('page_number')}")
+
     print("[STAGE_RETURN_PROBE] ===== END FINAL RETURN DUMP =====\n")
 
     return balanced
@@ -654,7 +631,7 @@ def format_context_for_llm(context_elements: List[Dict[str, Any]]) -> str:
     print(final_context)
     print("[STAGE_E_PROBE] ===== END formatted_context STRING =====\n")
     print("[STAGE_E_PROBE] ===== SEARCH RESULTS IN formatted_context =====")
-    for needle in ["Priority 2", "$400M", "400M", "Mumbai", "Hyderabad", "60%"]:
+    for needle in ["Priority 2", "$400M", "400M", "Mumbai", "Hyderabad", "60%", "48d10f0d", "SSP1-1.9", "SSP5-8.5", "1.5°C", "1.6°C"]:
         print(f"[STAGE_E_PROBE] contains {needle!r}? -> {needle in final_context}")
     print("[STAGE_E_PROBE] ===== END SEARCH RESULTS =====\n")
 
@@ -668,14 +645,19 @@ def build_citations(
     seen = set()
     print("\n========== BUILDING CITATIONS ==========")
 
-    # Gate 1: primary, non-heading, above retrieval threshold
+    # Gate 1: primary, non-heading
+    # NOTE: previously also required reranked_score >= CITATION_THRESHOLD here.
+    # Removed — reranked_score reflects relevance to the QUESTION (computed during
+    # retrieval), not relevance to the ANSWER. For synthesis questions, the
+    # paragraph that supplies a specific answer detail can score low against the
+    # question's wording while still being exactly what the answer used. Gate 2
+    # (attribution, below) is the correct and sufficient filter for citations,
+    # since it scores each candidate against the actual answer text.
     candidates = [
         elem for elem in context_elements
         if elem.get("is_primary", False)
         and elem.get("type", "unknown") != "heading"
-        and elem.get("reranked_score", 1.0) >= CITATION_THRESHOLD
     ]
-
     # Gate 2: answer attribution
     if answer_text.strip() and candidates:
         candidate_texts = [_scoring_text(elem) for elem in candidates]
