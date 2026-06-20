@@ -22,6 +22,7 @@ MEDIUM_CONFIDENCE = 0.0
 ANSWER_CITATION_THRESHOLD = -0.5
 ANSWER_ATTRIBUTION_THRESHOLD = -0.5
 PRIMARY_PROMOTION_THRESHOLD = 0.5
+SECTION_BOOST = 100.0
 
 def _scoring_text(elem: Dict[str, Any]) -> str:
     """
@@ -52,6 +53,7 @@ def retrieve_context(
 
     q_vec = embed_query(question)
     ref = _extract_reference(question)
+    section_intent = _extract_section_intent(question)
     if not q_vec:
         print("[retrieval] embed_query returned empty vector")
         return []
@@ -127,6 +129,24 @@ def retrieve_context(
                     f"[retrieval] Boosted reference match "
                     f"page={hit.get('page_number')} "
                     f"type={hit.get('type')}"
+                )
+
+    # ── Section-intent boost ───────────────────────────────────────
+    if section_intent:
+        section_target = section_intent["section"].lower()
+
+        print(f"[retrieval] Detected section intent: {section_target}")
+
+        for hit in primary_hits:
+            section_heading = (hit.get("section_heading", "") or "").lower()
+
+            if section_target in section_heading or section_heading in section_target:
+                hit["reranked_score"] += SECTION_BOOST
+
+                print(
+                    f"[retrieval] Boosted section match "
+                    f"page={hit.get('page_number')} "
+                    f"section={hit.get('section_heading')}"
                 )
 
     primary_hits.sort(key=lambda h: h["reranked_score"], reverse=True)
@@ -382,6 +402,48 @@ def _extract_reference(query: str):
         "kind": m.group(1).lower(),
         "number": m.group(2),
     }
+
+def _extract_section_intent(query: str):
+    """
+    Detects section-scoping phrases in a question and extracts the
+    referenced section title.
+
+    Example:
+        "Looking specifically at Strategic Priorities for FY2025"
+        -> {"section": "Strategic Priorities for FY2025"}
+    """
+    pattern = (
+        r"(?:looking specifically at|according to|in the section|"
+        r"under the heading|based on the section|within the section|"
+        r"from the section)\s+"
+        r"(?:[\w']+\s+){0,4}?"
+        r"(?:section\s+)?(?:titled\s+|called\s+|on\s+)?"
+        r"['\"]([^'\"]+)['\"]"
+    )
+
+    m = re.search(pattern, query, re.I)
+
+    if not m:
+        # Fallback: same trigger phrases, no quotes required, capture up to punctuation
+        fallback_pattern = (
+            r"(?:looking specifically at|according to|in the section|"
+            r"under the heading|based on the section|within the section|"
+            r"from the section)\s+"
+            r"(?:[\w']+\s+){0,4}?"
+            r"(?:section\s+)?(?:titled\s+|called\s+|on\s+)?"
+            r"([A-Za-z0-9][^.,;:\n]*?)"
+            r"(?=[.,;:\n]|$)"
+        )
+        m = re.search(fallback_pattern, query, re.I)
+
+    if not m:
+        return None
+
+    section = m.group(1).strip()
+    if not section:
+        return None
+
+    return {"section": section}
 
 def format_context_for_llm(context_elements: List[Dict[str, Any]]) -> str:
     """
