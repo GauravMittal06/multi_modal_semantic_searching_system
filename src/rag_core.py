@@ -133,6 +133,7 @@ def upsert_elements(elements: List[Dict[str, Any]], embeddings: List[List[float]
             "section_heading": elem.get("section_heading", ""),
             "source_document": elem["source_document"],
             "related_elements": elem.get("related_elements", []),
+            "related_edges": elem.get("related_edges", []),
             "vision_summary": elem.get("vision_summary", ""),
             "keywords": elem.get("keywords", []),
             "metadata": elem.get("metadata", {}),
@@ -231,6 +232,33 @@ def fetch_elements_by_ids(element_ids: List[str]) -> List[Dict[str, Any]]:
         return [r.payload for r in results if r.payload]
     except Exception as e:
         print(f"[rag_core] fetch_elements_by_ids failed: {e}")
+        return []
+
+
+def fetch_all_elements_for_document(source_document: str, limit: int = 5000) -> List[Dict[str, Any]]:
+    """
+    Fetch every element belonging to a given source document, regardless of
+    relevance to any query. Used for the full-document graph explorer view,
+    where we need the complete node/edge set rather than a query-scoped one.
+    """
+    if _qdrant is None or not source_document:
+        return []
+    try:
+        flt = qmodels.Filter(
+            must=[qmodels.FieldCondition(
+                key="source_document",
+                match=qmodels.MatchValue(value=source_document)
+            )]
+        )
+        results, _ = _qdrant.scroll(
+            collection_name=QDRANT_COLLECTION,
+            scroll_filter=flt,
+            limit=limit,
+            with_payload=True,
+        )
+        return [r.payload for r in results if r.payload]
+    except Exception as e:
+        print(f"[rag_core] fetch_all_elements_for_document failed: {e}")
         return []
 
 

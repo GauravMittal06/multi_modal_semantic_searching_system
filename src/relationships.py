@@ -148,6 +148,33 @@ def build_relationship_graph(elements: List[Dict[str, Any]]) -> nx.DiGraph:
         # Cross-page section-wide linking was producing excessive, low-precision
         # related_elements lists once section_heading stopped being a useless
         # constant (see extractor.py fix).
+
+    # ── Typed/directed edge list per element ───────────────────────────────
+    # related_elements (above) is a bare list of IDs with no relation type or
+    # direction, so it can't reconstruct edge labels later (e.g. for the UI
+    # graph view or for relationships_used in explainability). We mirror the
+    # same information here as a structured list, attached to each element so
+    # it survives into the Qdrant payload without needing the graph object
+    # itself to be persisted.
+    elem_by_id = {e["id"]: e for e in elements}
+    for elem in elements:
+        elem["related_edges"] = []
+
+    for src, dst, data in G.edges(data=True):
+        relation = data.get("relation", "unknown")
+        if src in elem_by_id:
+            elem_by_id[src]["related_edges"].append({
+                "to": dst,
+                "relation": relation,
+                "direction": "out",
+            })
+        if dst in elem_by_id:
+            elem_by_id[dst]["related_edges"].append({
+                "to": src,
+                "relation": relation,
+                "direction": "in",
+            })
+
     return G
 
 
@@ -184,3 +211,47 @@ def summarize_graph(graph: nx.DiGraph) -> Dict[str, Any]:
             for _, _, d in graph.edges(data=True)
         )),
     }
+
+
+def rebuild_graph_from_elements(elements: List[Dict[str, Any]]) -> nx.DiGraph:
+    """
+    Reconstructs a NetworkX graph from each element's persisted `related_edges`
+    field (Qdrant payload), without needing the original in-memory graph object
+    from ingestion. Used post-ingestion, e.g. by the UI's graph view and by
+    explainability, where only Qdrant-fetched elements are available.
+
+    Elements missing `related_edges` (e.g. ingested before this field existed)
+    contribute no edges but still appear as isolated nodes.
+    """
+    G = nx.DiGraph()
+    elem_by_id = {e.get("element_id") or e.get("id"): e for e in elements}
+
+    for elem in elements:
+        eid = elem.get("element_id") or elem.get("id")
+        if not eid:
+            continue
+        G.add_node(eid, **{
+            "type": elem.get("type", "unknown"),
+            "page": elem.get("page_number"),
+            "section": elem.get("section_heading", ""),
+            "content_preview": (elem.get("content") or elem.get("vision_summary") or "")[:80],
+        })
+
+    for elem in elements:
+        eid = elem.get("element_id") or elem.get("id")
+        for edge in elem.get("related_edges", []) or []:
+            other = edge.get("to")
+            relation = edge.get("relation", "related")
+            direction = edge.get("direction", "out")
+            if other not in elem_by_id:
+                # neighbor wasn't fetched/in this element set — skip rather
+                # than draw an edge to a node we can't render
+                continue
+            if direction == "out":
+                src, dst = eid, other
+            else:
+                src, dst = other, eid
+            if not G.has_edge(src, dst):
+                G.add_edge(src, dst, relation=relation)
+
+    return G

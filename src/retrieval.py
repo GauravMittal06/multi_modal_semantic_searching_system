@@ -9,8 +9,10 @@ from typing import List, Dict, Any, Optional
 
 try:
     from .rag_core import embed_query, search_elements, fetch_elements_by_ids, rerank_pairs
+    from .graph_view import relationships_used_from_subgraph
 except ImportError:
     from rag_core import embed_query, search_elements, fetch_elements_by_ids, rerank_pairs
+    from graph_view import relationships_used_from_subgraph
 
 TABLE_THRESHOLD = -1.5
 IMAGE_THRESHOLD = -1.0
@@ -493,19 +495,6 @@ def build_citations(
     return citations
 
 
-def _humanize_relation(type_a: str, type_b: str) -> Optional[str]:
-    pair = {type_a, type_b}
-    if pair == {"paragraph", "table"}:
-        return "Paragraph explains Table"
-    if pair == {"paragraph", "image"}:
-        return "Paragraph references Image"
-    if pair == {"table", "image"}:
-        return "Image visualizes Table data"
-    if pair == {"table"} and type_a == type_b == "table":
-        return "Related tables connected by topic"
-    return None
-
-
 def build_explainability(
     context_elements: List[Dict[str, Any]],
     citations: List[Dict[str, Any]],
@@ -551,30 +540,15 @@ def build_explainability(
         for e in evidence
     ]
 
-    # ── Relationships used (human-readable, derived from shared section) ──────
-    relationships_used: List[str] = []
-    seen_rel = set()
-    # for i, a in enumerate(evidence):
-    #     for b in evidence[i + 1:]:
-    #         if a.get("section_heading") and a.get("section_heading") == b.get("section_heading"):
-    #             label = _humanize_relation(a.get("type", ""), b.get("type", ""))
-    #             if label and label not in seen_rel:
-    #                 seen_rel.add(label)
-    #                 relationships_used.append(label)
-
-    #         for para, img in ((a, b), (b, a)):
-    #             if para.get("type") == "paragraph" and img.get("type") == "image":
-    #                 content = (para.get("content") or "").lower()
-    #                 if len(content.split()) <= 15 and any(
-    #                     k in content for k in ["figure", "fig.", "chart", "table"]
-    #                 ):
-    #                     label = "Caption supports Image"
-    #                     if label not in seen_rel:
-    #                         seen_rel.add(label)
-    #                         relationships_used.append(label)
-
-    # relationships_used = relationships_used[:6]
-    relationships_used = []
+    # ── Relationships used (real graph edges between evidence elements) ───────
+    # Uses the persisted related_edges (typed, directed) from relationships.py
+    # rather than a same-section heuristic — see graph_view.py for the
+    # subgraph reconstruction this is built on.
+    try:
+        relationships_used = relationships_used_from_subgraph(context_elements)
+    except Exception as ex:
+        print(f"[explainability] relationships_used_from_subgraph failed: {ex}")
+        relationships_used = []
 
     # ── Modalities used ────────────────────────────────────────────────────────
     types_present = set(e.get("type") for e in evidence)

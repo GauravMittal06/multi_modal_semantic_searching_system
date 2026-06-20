@@ -13,7 +13,7 @@ import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.extractor import extract_document
 from src.vision import enrich_image_elements
-from src.relationships import build_relationship_graph
+from src.relationships import build_relationship_graph, summarize_graph
 from src.rag_core import embed_passages, upsert_elements, delete_by_source
 
 def ingest_document(filepath: str, original_filename: str = None) -> Dict[str, Any]:
@@ -33,7 +33,8 @@ def ingest_document(filepath: str, original_filename: str = None) -> Dict[str, A
 
     print("[3/5] Building relationship graph...")
     graph = build_relationship_graph(elements)
-    print(f"       → {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+    graph_summary = summarize_graph(graph)
+    print(f"       → {graph_summary['total_nodes']} nodes, {graph_summary['total_edges']} edges")
 
     print("[4/5] Embedding all elements...")
     texts_to_embed = []
@@ -56,7 +57,9 @@ def ingest_document(filepath: str, original_filename: str = None) -> Dict[str, A
         "source": source_name,
         "total_elements": len(elements),
         "type_counts": type_counts,
-        "graph_edges": graph.number_of_edges(),
+        "graph_nodes": graph_summary["total_nodes"],
+        "graph_edges": graph_summary["total_edges"],
+        "relation_types": graph_summary["relation_types"],
     }
 
 

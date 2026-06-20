@@ -12,6 +12,8 @@ from pathlib import Path
 
 from src.ingest import ingest_document
 from src.answer import generate_answer
+from src.graph_view import answer_subgraph_elements, full_document_graph, render_pyvis_html
+import streamlit.components.v1 as components
 
 def clear_temp_vision_artifacts():
     """
@@ -88,6 +90,56 @@ def render_explainability(explainability: dict):
         badge = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}.get(confidence, "🔴")
         st.markdown(f"{badge} **{confidence}**")
 
+
+def render_relationship_graph(context_elements: list, key: str):
+    """
+    Renders the per-answer relationship graph: evidence elements used in the
+    answer plus their direct graph neighbors, drawn with pyvis. This is the
+    judge-facing view of relationship awareness — scoped to one answer so it
+    stays small and readable rather than showing the whole document graph.
+    """
+    if not context_elements:
+        return
+    with st.expander("🕸️ Relationship Graph (this answer)", expanded=False):
+        try:
+            graph, elem_by_id = answer_subgraph_elements(context_elements)
+        except Exception as e:
+            st.caption(f"Graph unavailable: {e}")
+            return
+
+        if graph.number_of_nodes() == 0:
+            st.caption("No relationship data available for this answer.")
+            return
+
+        evidence_ids = [
+            e.get("element_id") or e.get("id")
+            for e in context_elements
+            if e.get("is_primary")
+        ]
+
+        st.caption(
+            f"{graph.number_of_nodes()} elements · {graph.number_of_edges()} relationships shown. "
+            "Larger, bordered nodes are the evidence used in the answer; smaller nodes are their "
+            "direct neighbors in the document graph."
+        )
+        legend_cols = st.columns(4)
+        for col, (t, color) in zip(legend_cols, [
+            ("Heading", "#F4A261"), ("Paragraph", "#2A9D8F"),
+            ("Table", "#E76F51"), ("Image", "#264653"),
+        ]):
+            col.markdown(
+                f"<span style='color:{color}'>●</span> {t}",
+                unsafe_allow_html=True,
+            )
+
+        html, info = render_pyvis_html(graph, elem_by_id, highlight_ids=evidence_ids, height="420px")
+        if info["capped"]:
+            st.caption(
+                f"⚠️ Showing {info['shown_nodes']} of {info['total_nodes']} elements "
+                "(most-connected nodes kept; evidence always shown)."
+            )
+        components.html(html, height=440, scrolling=False)
+
 st.set_page_config(
     page_title="Multi-Modal Document Intelligence",
     page_icon="🧠",
@@ -101,6 +153,10 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "ingest_stats" not in st.session_state:
     st.session_state.ingest_stats = None
+if "full_graph_html" not in st.session_state:
+    st.session_state.full_graph_html = None
+if "full_graph_info" not in st.session_state:
+    st.session_state.full_graph_info = None
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -131,6 +187,8 @@ with st.sidebar:
                     st.session_state.ingested_source = uploaded_file.name
                     st.session_state.ingest_stats = stats
                     st.session_state.chat_history = []
+                    st.session_state.full_graph_html = None
+                    st.session_state.full_graph_info = None
                     st.success(f"✅ Ingested: {uploaded_file.name}")
                 except Exception as e:
                     st.error(f"❌ Ingestion failed: {e}")
@@ -143,7 +201,14 @@ with st.sidebar:
         cols = st.columns(2)
         for i, (k, v) in enumerate(stats["type_counts"].items()):
             cols[i % 2].metric(k.capitalize(), v)
-        st.metric("Relationship Edges", stats["graph_edges"])
+        st.divider()
+        st.caption("Relationship Graph")
+        graph_cols = st.columns(2)
+        graph_cols[0].metric("Nodes", stats.get("graph_nodes", "—"))
+        graph_cols[1].metric("Edges", stats.get("graph_edges", "—"))
+        rel_types = stats.get("relation_types", [])
+        if rel_types:
+            st.caption("Edge types: " + ", ".join(sorted(rel_types)))
 
     if st.session_state.ingested_source:
         st.divider()
@@ -152,6 +217,8 @@ with st.sidebar:
             st.session_state.ingested_source = None
             st.session_state.chat_history = []
             st.session_state.ingest_stats = None
+            st.session_state.full_graph_html = None
+            st.session_state.full_graph_info = None
             st.rerun()
 
     st.divider()
@@ -176,71 +243,125 @@ if not st.session_state.ingested_source:
     with col3:
         st.markdown("**🔗 Relationship-Aware**\nLinks headings → sections → tables → images before retrieval")
 else:
-    # ─── Chat Interface ───────────────────────────────────────────────────────
-    for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if msg["role"] == "assistant" and msg.get("citations"):
-                with st.expander("📎 Sources", expanded=False):
-                    for c in msg["citations"]:
-                        st.markdown(
-                            f"- **{c['element_type'].capitalize()}** · "
-                            f"Page {c['page_number']} · "
-                            f"Section: _{c['section_name']}_ · "
-                            f"`{c['source_document']}`"
-                        )
-            if msg["role"] == "assistant":
-                render_explainability(msg.get("explainability"))
+    tab_chat, tab_graph = st.tabs(["💬 Chat", "🕸️ Document Graph Explorer"])
 
-    question = st.chat_input("Ask a question about the document...")
+    with tab_chat:
+        # ─── Chat Interface ───────────────────────────────────────────────────
+        for i, msg in enumerate(st.session_state.chat_history):
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                if msg["role"] == "assistant" and msg.get("citations"):
+                    with st.expander("📎 Sources", expanded=False):
+                        for c in msg["citations"]:
+                            st.markdown(
+                                f"- **{c['element_type'].capitalize()}** · "
+                                f"Page {c['page_number']} · "
+                                f"Section: _{c['section_name']}_ · "
+                                f"`{c['source_document']}`"
+                            )
+                if msg["role"] == "assistant":
+                    render_explainability(msg.get("explainability"))
+                    render_relationship_graph(
+                        msg.get("context_elements", []),
+                        key=f"hist_{i}",
+                    )
 
-    if question:
-        st.session_state.chat_history.append({"role": "user", "content": question})
-        with st.chat_message("user"):
-            st.markdown(question)
+        question = st.chat_input("Ask a question about the document...")
 
-        with st.chat_message("assistant"):
-            with st.spinner("Retrieving context across paragraphs, tables, and images..."):
-                result = generate_answer(
-                    question=question,
-                    source_document=st.session_state.ingested_source,
-                    top_k=8,
+        if question:
+            st.session_state.chat_history.append({"role": "user", "content": question})
+            with st.chat_message("user"):
+                st.markdown(question)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Retrieving context across paragraphs, tables, and images..."):
+                    result = generate_answer(
+                        question=question,
+                        source_document=st.session_state.ingested_source,
+                        top_k=8,
+                    )
+
+                st.markdown(result["answer"])
+
+                if result["citations"]:
+                    with st.expander("📎 Sources", expanded=True):
+                        for c in result["citations"]:
+                            st.markdown(
+                                f"- **{c['element_type'].capitalize()}** · "
+                                f"Page {c['page_number']} · "
+                                f"Section: _{c['section_name']}_ · "
+                                f"`{c['source_document']}`"
+                            )
+
+                if result.get("error"):
+                    st.warning(f"Warning: {result['error']}")
+
+                render_explainability(result.get("explainability"))
+                render_relationship_graph(result.get("context_used", []), key="live")
+
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": result["answer"],
+                "citations": result["citations"],
+                "explainability": result.get("explainability"),
+                "context_elements": result.get("context_used", []),
+            })
+
+        # ─── Debug Panel ──────────────────────────────────────────────────────
+        with st.expander("🔍 Debug: Retrieved Context", expanded=False):
+            if st.session_state.chat_history:
+                last_q = next(
+                    (m["content"] for m in reversed(st.session_state.chat_history) if m["role"] == "user"),
+                    None,
                 )
+                if last_q and st.button("Show context for last question"):
+                    from src.retrieval import retrieve_context, format_context_for_llm
+                    ctx = retrieve_context(last_q, source_document=st.session_state.ingested_source)
+                    st.text(format_context_for_llm(ctx))
+            else:
+                st.caption("Ask a question first.")
 
-            st.markdown(result["answer"])
+    with tab_graph:
+        st.subheader("🕸️ Full Document Relationship Graph")
+        st.caption(
+            "Every element and relationship extracted from this document — headings, "
+            "paragraphs, tables, and images, linked the way they actually relate in the source."
+        )
+        legend_cols = st.columns(4)
+        for col, (t, color) in zip(legend_cols, [
+            ("Heading", "#F4A261"), ("Paragraph", "#2A9D8F"),
+            ("Table", "#E76F51"), ("Image", "#264653"),
+        ]):
+            col.markdown(f"<span style='color:{color}'>●</span> {t}", unsafe_allow_html=True)
 
-            if result["citations"]:
-                with st.expander("📎 Sources", expanded=True):
-                    for c in result["citations"]:
-                        st.markdown(
-                            f"- **{c['element_type'].capitalize()}** · "
-                            f"Page {c['page_number']} · "
-                            f"Section: _{c['section_name']}_ · "
-                            f"`{c['source_document']}`"
-                        )
+        if st.button("🔄 Load / Refresh Full Graph", use_container_width=True):
+            with st.spinner("Fetching all document elements and rebuilding graph..."):
+                try:
+                    graph, elem_by_id = full_document_graph(st.session_state.ingested_source)
+                    html, info = render_pyvis_html(
+                        graph, elem_by_id, height="650px", physics=True, max_nodes=300,
+                    )
+                    st.session_state.full_graph_html = html
+                    st.session_state.full_graph_info = info
+                except Exception as e:
+                    st.error(f"Failed to load full document graph: {e}")
+                    st.session_state.full_graph_html = None
+                    st.session_state.full_graph_info = None
 
-            if result.get("error"):
-                st.warning(f"Warning: {result['error']}")
-
-            render_explainability(result.get("explainability"))
-
-        st.session_state.chat_history.append({
-            "role": "assistant",
-            "content": result["answer"],
-            "citations": result["citations"],
-            "explainability": result.get("explainability"),
-        })
-
-    # ─── Debug Panel ──────────────────────────────────────────────────────────
-    with st.expander("🔍 Debug: Retrieved Context", expanded=False):
-        if st.session_state.chat_history:
-            last_q = next(
-                (m["content"] for m in reversed(st.session_state.chat_history) if m["role"] == "user"),
-                None,
+        if st.session_state.get("full_graph_html"):
+            info = st.session_state.get("full_graph_info") or {}
+            st.caption(
+                f"{info.get('shown_nodes', '—')} of {info.get('total_nodes', '—')} elements shown · "
+                f"{info.get('shown_edges', '—')} of {info.get('total_edges', '—')} relationships shown"
             )
-            if last_q and st.button("Show context for last question"):
-                from src.retrieval import retrieve_context, format_context_for_llm
-                ctx = retrieve_context(last_q, source_document=st.session_state.ingested_source)
-                st.text(format_context_for_llm(ctx))
+            if info.get("capped"):
+                st.warning(
+                    f"This document has {info.get('total_nodes')} elements — too many to render "
+                    f"all at once and stay readable. Showing the {info.get('shown_nodes')} "
+                    "most-connected elements with a static layout (physics disabled for "
+                    "performance). For a full per-answer view of any specific evidence, ask a "
+                    "question in the Chat tab instead."
+                )
+            components.html(st.session_state.full_graph_html, height=670, scrolling=False)
         else:
-            st.caption("Ask a question first.")
+            st.info("Click **Load / Refresh Full Graph** to render the complete document relationship graph. This pulls every element from Qdrant, so it may take a few seconds on large documents.")

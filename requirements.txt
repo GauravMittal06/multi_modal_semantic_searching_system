@@ -8,6 +8,7 @@ pymupdf
 pdfplumber
 python-docx
 networkx
+pyvis
 pillow
 camelot-py[cv]
 pandas
