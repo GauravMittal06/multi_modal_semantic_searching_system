@@ -54,8 +54,6 @@ def generate_answer(
         }
 
     formatted_context = format_context_for_llm(context_elements)
-    citations = build_citations(context_elements)
-    explainability = build_explainability(context_elements, citations)
 
     # Step 3: Build prompt
     prompt = f"""You are an expert document analyst. Answer questions using ONLY the provided document context below.
@@ -94,16 +92,22 @@ ANSWER:"""
         )
         answer = response.text or "No answer generated."
     except Exception as e:
+        fallback_citations = build_citations(context_elements, answer_text="")
+        fallback_explainability = build_explainability(context_elements, fallback_citations, answer_text="")
         return {
             "answer": f"Answer generation failed: {str(e)}",
-            "citations": citations,
+            "citations": fallback_citations,
             "context_used": context_elements,
-            "explainability": explainability,
+            "explainability": fallback_explainability,
             "error": str(e),
         }
 
+    answer_text = answer.strip()
+    citations = build_citations(context_elements, answer_text=answer_text)
+    explainability = build_explainability(context_elements, citations, answer_text=answer_text)
+
     return {
-        "answer": answer.strip(),
+        "answer": answer_text,
         "citations": citations,
         "context_used": context_elements,
         "explainability": explainability,

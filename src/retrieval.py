@@ -17,6 +17,29 @@ IMAGE_THRESHOLD = -1.0
 CITATION_THRESHOLD = -0.5
 HIGH_CONFIDENCE = 2.5
 MEDIUM_CONFIDENCE = 0.0
+ANSWER_CITATION_THRESHOLD = -0.5
+ANSWER_ATTRIBUTION_THRESHOLD = -0.5
+PRIMARY_PROMOTION_THRESHOLD = 0.5
+
+def _scoring_text(elem: Dict[str, Any]) -> str:
+    """
+    Returns clean text for cross-encoder scoring.
+    Strips [TABLE COLUMNS:] / [KEY VALUES:] prefixes from tables,
+    then normalises pipe-delimited structure to prose-like tokens.
+    For images uses vision_summary. For all others uses content.
+    """
+    if elem.get("type") == "table":
+        raw = elem.get("content", "")
+        lines = raw.splitlines()
+        clean_lines = [
+            l for l in lines
+            if not l.startswith("[TABLE COLUMNS:") and not l.startswith("[KEY VALUES:")
+        ]
+        cleaned = "\n".join(clean_lines).strip()
+        cleaned = re.sub(r"\s*\|\s*", " ", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        return cleaned
+    return elem.get("vision_summary") or elem.get("content", "")
 
 def retrieve_context(
     question: str,
@@ -55,6 +78,11 @@ def retrieve_context(
         for h in unfiltered:
             print(f"  → source_document in payload: '{h.get('source_document')}'")
         return []
+
+    # Deprioritize page snapshots before cross-encoder — they flood short queries
+    for h in primary_hits:
+        if h.get("metadata", {}).get("is_page_render") or h.get("metadata", {}).get("image_type") == "page_snapshot":
+            h["score"] = h.get("score", 0.0) * 0.5
 
     primary_texts = [h.get("vision_summary") or h.get("content", "") for h in primary_hits]
     primary_scores = rerank_pairs(question, primary_texts)
@@ -111,7 +139,7 @@ def retrieve_context(
         )
     
         print(
-            (hit.get("content") or hit.get("vision_summary") or "")[:500]
+            (hit.get("content") or hit.get("vision_summary") or "")[:150]
         )
     expanded_seed_hits = primary_hits[:15]
     primary_hits = primary_hits[:8]
@@ -143,7 +171,7 @@ def retrieve_context(
         source_document=source_document,
         element_types=["table"],
     )
-    table_texts = [h.get("content", "") for h in table_hits]
+    table_texts = [_scoring_text(h) for h in table_hits]
     table_scores = rerank_pairs(question, table_texts)
     for hit, reranked in zip(table_hits, table_scores):
 
@@ -153,7 +181,15 @@ def retrieve_context(
             0.35 * vector_score
             + 0.65 * reranked
         )
-        print(f"[calibration] table score={reranked:.4f}")
+        cross_score = table_scores[table_hits.index(hit)]
+
+        print(
+            f"[table-rank] "
+            f"page={hit.get('page_number')} "
+            f"vector={vector_score:.3f} "
+            f"cross={cross_score:.3f} "
+            f"final={reranked:.3f}"
+        )
         eid = hit.get("element_id", "")
         if eid and eid not in seen_ids:
             if reranked < TABLE_THRESHOLD:
@@ -181,7 +217,7 @@ def retrieve_context(
             0.35 * vector_score
             + 0.65 * reranked
         )
-        print(f"[calibration] image score={reranked:.4f}")
+        # print(f"[calibration] image score={reranked:.4f}")
         eid = hit.get("element_id", "")
         if eid and eid not in seen_ids:
             if reranked < IMAGE_THRESHOLD:
@@ -221,11 +257,6 @@ def retrieve_context(
         primary_pages = set(h.get("page_number") for h in primary_hits)
         primary_sections = set(h.get("section_heading", "") for h in primary_hits if h.get("section_heading"))
         for hit in related_hits:
-            print(
-                f"  -> type={hit.get('type')} | "
-                f"page={hit.get('page_number')} | "
-                f"section={hit.get('section_heading','')}"
-            )
             if hit.get("type") == "heading":
                 continue
             hit_page = hit.get("page_number")
@@ -245,6 +276,12 @@ def retrieve_context(
 
             hit["reranked_score"] = parent_score * 0.8
             context_elements.append(hit)
+
+    # ── Promote high-scoring related elements to primary ──────────────────────
+    for elem in context_elements:
+        if not elem.get("is_primary", False):
+            if elem.get("reranked_score", -999) >= PRIMARY_PROMOTION_THRESHOLD:
+                elem["is_primary"] = True
 
     # ── Final dedup by element_id ─────────────────────────────────────────────
     final_deduped = []
@@ -281,6 +318,23 @@ def retrieve_context(
 
     balanced.sort(key=lambda x: (not x.get("is_primary", False), -x.get("reranked_score", 0.0)))
 
+    # ── Modality diagnostics ────────────────────────────────────────
+    modality_counts = {
+        "paragraph": 0,
+        "table": 0,
+        "image": 0,
+        "heading": 0,
+    }
+
+    for elem in balanced:
+        t = elem.get("type", "unknown")
+        modality_counts[t] = modality_counts.get(t, 0) + 1
+
+    print("\n========== MODALITY SUMMARY ==========")
+    for modality, count in modality_counts.items():
+        print(f"{modality}: {count}")
+    print("======================================")
+
     print("\n========== FINAL CONTEXT ==========")
     for elem in balanced:
         print(
@@ -291,6 +345,24 @@ def retrieve_context(
             f"section={elem.get('section_heading','')}"
         )
     print("===================================\n")
+
+    # ── Section distribution diagnostics ─────────────────────────────
+    section_counts = {}
+
+    for elem in balanced:
+        sec = elem.get("section_heading", "") or "NO_SECTION"
+        section_counts[sec] = section_counts.get(sec, 0) + 1
+
+    print("========== SECTION DISTRIBUTION ==========")
+
+    for sec, count in sorted(
+        section_counts.items(),
+        key=lambda x: x[1],
+        reverse=True,
+    ):
+        print(f"{count}x | {sec}")
+
+    print("==========================================\n")
 
     return balanced
 
@@ -349,25 +421,42 @@ def format_context_for_llm(context_elements: List[Dict[str, Any]]) -> str:
 
     return "\n\n---\n\n".join(parts)
 
-
-def build_citations(context_elements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_citations(
+    context_elements: List[Dict[str, Any]],
+    answer_text: str = "",
+) -> List[Dict[str, Any]]:
     citations = []
     seen = set()
     print("\n========== BUILDING CITATIONS ==========")
 
-    for elem in context_elements:
-        if not elem.get("is_primary", False):
+    # Gate 1: primary, non-heading, above retrieval threshold
+    candidates = [
+        elem for elem in context_elements
+        if elem.get("is_primary", False)
+        and elem.get("type", "unknown") != "heading"
+        and elem.get("reranked_score", 1.0) >= CITATION_THRESHOLD
+    ]
+
+    # Gate 2: answer attribution
+    if answer_text.strip() and candidates:
+        candidate_texts = [_scoring_text(elem) for elem in candidates]
+        attribution_scores = rerank_pairs(answer_text, candidate_texts)
+    else:
+        attribution_scores = [1.0] * len(candidates)
+
+    modality_counts: Dict[str, int] = {}
+
+    for elem, attr_score in zip(candidates, attribution_scores):
+        if attr_score < ANSWER_CITATION_THRESHOLD:
+            print(
+                f"[citation] EXCLUDED by attribution | "
+                f"attr={attr_score:.3f} | "
+                f"page={elem.get('page_number')} | "
+                f"section={elem.get('section_heading', '')}"
+            )
             continue
+
         elem_type = elem.get("type", "unknown")
-
-        # Headings are semantic anchors, not citable evidence
-        if elem_type == "heading":
-            continue
-
-        # Skip forced-in elements that scored too low to be genuinely relevant
-        if elem.get("reranked_score", 1.0) < CITATION_THRESHOLD:
-            continue
-
         page = elem.get("page_number", "?")
         section = elem.get("section_heading", "")
         source = elem.get("source_document", "")
@@ -377,10 +466,14 @@ def build_citations(context_elements: List[Dict[str, Any]]) -> List[Dict[str, An
             continue
         seen.add(key)
 
+        elem["_attribution_score"] = attr_score
+        modality_counts[elem_type] = modality_counts.get(elem_type, 0) + 1
+
         print(
             f"[citation] type={elem_type} | "
             f"page={page} | "
-            f"score={round(elem.get('reranked_score', 0.0), 3)} | "
+            f"retrieval={round(elem.get('reranked_score', 0.0), 3)} | "
+            f"attribution={round(attr_score, 3)} | "
             f"section={section}"
         )
 
@@ -391,6 +484,9 @@ def build_citations(context_elements: List[Dict[str, Any]]) -> List[Dict[str, An
             "section_name": section,
         })
 
+    print(f"[citation] modality summary:")
+    for t, c in modality_counts.items():
+        print(f"  {t}: {c}")
     print(f"[citation] total citations: {len(citations)}")
     print("========================================\n")
 
@@ -413,40 +509,37 @@ def _humanize_relation(type_a: str, type_b: str) -> Optional[str]:
 def build_explainability(
     context_elements: List[Dict[str, Any]],
     citations: List[Dict[str, Any]],
+    answer_text: str = "",
 ) -> Dict[str, Any]:
     """
     Judge-friendly, non-technical summary of how the answer was formed.
-    No scores, IDs, or vector metadata — only type/page/section level info.
+    Evidence is built from answer attribution, independent of citations.
     """
     _seen_evidence_keys = set()
     evidence = []
-    citation_keys = {
-        (
-            c["page_number"],
-            c["element_type"]
-        )
-        for c in citations
-    }
 
-    for e in context_elements:
+    primary_candidates = [
+        e for e in context_elements
+        if e.get("is_primary", False)
+        and e.get("type") != "heading"
+        and ((e.get("content") or "").strip() or (e.get("vision_summary") or "").strip())
+    ]
 
-        if (
-            e.get("page_number"),
-            e.get("type")
-        ) not in citation_keys:
+    if answer_text.strip() and primary_candidates:
+        candidate_texts = [_scoring_text(e) for e in primary_candidates]
+        attr_scores = rerank_pairs(answer_text, candidate_texts)
+    else:
+        attr_scores = [1.0] * len(primary_candidates)
+
+    for e, attr_score in zip(primary_candidates, attr_scores):
+        if attr_score < ANSWER_ATTRIBUTION_THRESHOLD:
             continue
-        if e.get("type") == "heading":
-            continue
-        if not ((e.get("content") or "").strip() or (e.get("vision_summary") or "").strip()):
-            continue
-        # Dedup by element_id when available, falling back to a content-based
-        # key when element_id is missing/empty so duplicate payloads from
-        # upstream retrieval don't get double-counted in the evidence panel.
         eid = e.get("element_id", "")
         dedup_key = eid if eid else f"{e.get('source_document','')}|{e.get('page_number','')}|{e.get('type','')}|{(e.get('content') or e.get('vision_summary') or '')[:120]}"
         if dedup_key in _seen_evidence_keys:
             continue
         _seen_evidence_keys.add(dedup_key)
+        e["_attribution_score"] = attr_score
         evidence.append(e)
 
     evidence_used = [

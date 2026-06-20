@@ -4,7 +4,7 @@ Document Structure Extractor — Module 1
 Extracts headings, paragraphs, tables, and images from PDF and DOCX files.
 Outputs every element as a structured dict matching the BRD JSON schema.
 """
-
+import re
 import os
 import uuid
 import json
@@ -47,16 +47,30 @@ def _line_text(line):
 
 def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
     elements: List[Dict[str, Any]] = []
-    current_heading = "Introduction"
+    current_heading = ""
 
     # --- Text + Headings via PyMuPDF ---
     doc = fitz.open(filepath)
+    _all_doc_sizes = [
+        span.get("size", 12)
+        for page in doc
+        for block in page.get_text("dict")["blocks"]
+        if block.get("type") == 0
+        for line in block.get("lines", [])
+        for span in line.get("spans", [])
+        if span.get("text", "").strip()
+    ]
+    doc_median_font = sorted(_all_doc_sizes)[len(_all_doc_sizes) // 2] if _all_doc_sizes else 12
+
     for page_num, page in enumerate(doc, start=1):
         blocks = page.get_text("dict")["blocks"]
         all_sizes = [span.get("size", 12) for block in blocks if block.get("type") == 0
                      for line in block.get("lines", []) for span in line.get("spans", [])
                      if span.get("text", "").strip()]
-        page_median_font = sorted(all_sizes)[len(all_sizes)//2] if all_sizes else 12
+        page_median_font = max(
+            sorted(all_sizes)[len(all_sizes) // 2] if all_sizes else 12,
+            doc_median_font,
+        )
         for block in blocks:
             if block.get("type") != 0:
                 continue
@@ -64,34 +78,34 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
             block_lines = []
             max_font_size = 0
             has_bold = False
-        
+
             for line in block.get("lines", []):
                 text = _line_text(line)
-        
+
                 if not text:
                     continue
                 
                 block_lines.append(text)
-        
+
                 spans = line.get("spans", [])
-        
+
                 line_font = max(
                     (s.get("size", 12) for s in spans),
                     default=12
                 )
-        
+
                 max_font_size = max(max_font_size, line_font)
-        
+
                 if any(bool(s.get("flags", 0) & (2**4)) for s in spans):
                     has_bold = True
-        
+
             block_text = " ".join(block_lines).strip()
-        
+
             if len(block_text) < 5:
                 continue
             
             words = block_text.split()
-        
+
             digit_ratio = (
                 sum(
                     1
@@ -106,7 +120,7 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                 )
                 / max(len(words), 1)
             )
-        
+
             is_heading = (
                 (max_font_size > page_median_font * 1.15
                  or (has_bold and max_font_size > page_median_font * 1.05))
@@ -115,16 +129,25 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                 and digit_ratio < 0.15
                 and not block_text.endswith((".", ":", ";", ",", "?"))
             )
-        
+
+            _HEADING_BLOCKLIST = {"n", "o", "no", "of", "to", "by", "in", "or", "and"}
+            _SIDEBAR_PATTERNS = {
+                "speak up", "reporting concerns", "speak up | reporting concerns",
+                "see accompanying notes", "additional restrictions", "designated individuals",
+            }
             if (
-                block_text.lower() in {"n", "o"}
-                or block_text in {"}", "{", ")", "(", "]", "[", "|"}
+                block_text.lower() in _HEADING_BLOCKLIST
+                or block_text.lower() in _SIDEBAR_PATTERNS
+                or any(p in block_text.lower() for p in _SIDEBAR_PATTERNS)
+                or block_text.strip() in {"}", "{", ")", "(", "]", "[", "|", "—", "-", "–"}
+                or re.match(r"^\d+[\.\)\-]?\s*$", block_text.strip())
+                or all(len(w) == 1 for w in words)
             ):
                 is_heading = False
-        
+
             if is_heading:
                 current_heading = block_text
-        
+
                 elements.append(
                     _make_element(
                         "heading",
@@ -135,7 +158,7 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                         {"font_size": max_font_size},
                     )
                 )
-        
+
             else:
                 if len(block_text) > 20:
                     elements.append(
@@ -185,6 +208,7 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                                 "table_header": header_hint_clean,
                             }
                         )
+                        elem["embed_content"] = table_text_clean
                         elements.append(elem)
     except ImportError:
         print("[extractor] pdfplumber not installed — skipping table extraction")
@@ -318,7 +342,7 @@ def extract_from_docx(filepath: str, source_name: str) -> List[Dict[str, Any]]:
 
     elements: List[Dict[str, Any]] = []
     doc = Document(filepath)
-    current_heading = "Introduction"
+    current_heading = ""
     page_num = 1
 
     all_font_sizes = [r.font.size.pt for p in doc.paragraphs for r in p.runs if r.font.size]
@@ -417,14 +441,16 @@ def extract_from_docx(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                             all_cells.append(ct)
                 semantic_tags = " | ".join(dict.fromkeys(all_cells[:12]))
                 table_text_with_hint = f"[TABLE COLUMNS: {header_hint}]\n[KEY VALUES: {semantic_tags}]\n{table_text_clean}"
-                elements.append(_make_element(
+                tbl_elem = _make_element(
                     "table", table_text_with_hint, page_num, current_heading,
                     source_name, {
                         "raw_rows": len(tbl_obj.rows),
                         "raw_cols": len(tbl_obj.columns),
                         "table_header": header_hint,
                     }
-                ))
+                )
+                tbl_elem["embed_content"] = table_text_clean
+                elements.append(tbl_elem)
                 char_count += len(table_text)
 
     return elements
@@ -448,8 +474,10 @@ def extract_document(filepath: str, source_name: str = None) -> List[Dict[str, A
 def _get_heading_for_page(elements: List[Dict], page_num: int) -> str:
     """
     Prefer a heading from the same page.
-    If none exists, fall back to the most recent previous heading.
+    Otherwise only inherit a heading from a nearby page.
     """
+
+    MAX_HEADING_LOOKBACK = 3
 
     page_headings = [
         e["content"]
@@ -461,10 +489,27 @@ def _get_heading_for_page(elements: List[Dict], page_num: int) -> str:
     if page_headings:
         return page_headings[-1]
 
-    heading = "Introduction"
+    closest_heading = ""
+    closest_page = None
 
     for e in elements:
-        if e["type"] == "heading" and e["page_number"] < page_num:
-            heading = e["content"]
+        if e["type"] != "heading":
+            continue
 
-    return heading
+        if e["page_number"] >= page_num:
+            continue
+
+        if (
+            closest_page is None
+            or e["page_number"] > closest_page
+        ):
+            closest_page = e["page_number"]
+            closest_heading = e["content"]
+
+    if (
+        closest_page is not None
+        and page_num - closest_page <= MAX_HEADING_LOOKBACK
+    ):
+        return closest_heading
+
+    return ""
