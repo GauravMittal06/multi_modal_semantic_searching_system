@@ -22,3 +22,5 @@ extracted_images/
 *.pdf
 IPCC_AR6_SYR_LongerReport.pdf
 tsla-20241231-gen.pdf
+
+diagnose_attribution.py
