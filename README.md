@@ -1,8 +1,7 @@
 # 🧠 MultiModal Semantic Integration for Intelligent Document Understanding
 
-**Team:** Delluminati
-
-**Hackathon:** Dell FutureMinds AI Hackathon 2026 — Problem Statement 2
+-**Team:** Delluminati
+-**Hackathon:** Dell FutureMinds AI Hackathon 2026 — Problem Statement 2
 
 ---
 
