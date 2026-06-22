@@ -2,7 +2,6 @@
 
 **Team:** Delluminati
 **Hackathon:** Dell FutureMinds AI Hackathon 2026 — Problem Statement 2
-**Submission Deadline:** 22 June 2026
 
 ---
 
