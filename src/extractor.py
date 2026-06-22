@@ -469,6 +469,52 @@ def extract_from_docx(filepath: str, source_name: str) -> List[Dict[str, Any]]:
     current_heading = ""
     page_num = 1
 
+    images_dir = os.path.join(os.path.dirname(filepath), "extracted_images")
+    os.makedirs(images_dir, exist_ok=True)
+    _docx_img_counter = 0
+
+    def _extract_images_from_paragraph(paragraph, page_num, current_heading):
+        nonlocal _docx_img_counter
+        imgs = []
+        blips = paragraph._p.findall(
+            './/{http://schemas.openxmlformats.org/drawingml/2006/main}blip'
+        )
+        for blip in blips:
+            rid = blip.get(qn('r:embed'))
+            if not rid:
+                continue
+            try:
+                image_part = doc.part.related_parts[rid]
+                image_bytes = image_part.blob
+                image_ext = image_part.content_type.split("/")[-1]
+                if image_ext in ("x-emf", "x-wmf"):
+                    continue  # vector/metafile formats, not raster — skip
+                image_filename = f"{source_name}_p{page_num}_img{_docx_img_counter}.{image_ext}"
+                image_path = os.path.join(images_dir, image_filename)
+                with open(image_path, "wb") as f:
+                    f.write(image_bytes)
+                _docx_img_counter += 1
+                imgs.append({
+                    "id": str(uuid.uuid4()),
+                    "type": "image",
+                    "content": "",
+                    "page_number": page_num,
+                    "section_heading": current_heading,
+                    "source_document": source_name,
+                    "related_elements": [],
+                    "metadata": {
+                        "image_path": image_path,
+                        "image_filename": image_filename,
+                        "extension": image_ext,
+                        "y0": None,
+                    },
+                    "vision_summary": "",
+                    "keywords": [],
+                })
+            except Exception as e:
+                print(f"[extractor] docx image extract error page {page_num}: {e}")
+        return imgs
+
     all_font_sizes = [r.font.size.pt for p in doc.paragraphs for r in p.runs if r.font.size]
     doc_median_font = sorted(all_font_sizes)[len(all_font_sizes)//2] if all_font_sizes else 11
 
@@ -526,6 +572,8 @@ def extract_from_docx(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                 char_count = 0
 
             if not text:
+                img_elems = _extract_images_from_paragraph(para, page_num, current_heading)
+                elements.extend(img_elems)
                 continue
 
             char_count += len(text)
@@ -544,6 +592,9 @@ def extract_from_docx(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                     "paragraph", text, page_num, current_heading,
                     source_name, {}
                 ))
+
+            img_elems = _extract_images_from_paragraph(para, page_num, current_heading)
+            elements.extend(img_elems)
 
         elif tag == "tbl":
             tbl_obj = table_xml_elements.get(id(child))
@@ -576,6 +627,12 @@ def extract_from_docx(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                 tbl_elem["embed_content"] = table_text_clean
                 elements.append(tbl_elem)
                 char_count += len(table_text)
+
+            for row in tbl_obj.rows:
+                for cell in row.cells:
+                    for cell_para in cell.paragraphs:
+                        img_elems = _extract_images_from_paragraph(cell_para, page_num, current_heading)
+                        elements.extend(img_elems)
 
     return elements
 
