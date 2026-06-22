@@ -230,7 +230,7 @@ def retrieve_context(
     print("[STAGE_D_PROBE] ===== END PRE-TRUNCATION DUMP =====\n")
 
     expanded_seed_hits = primary_hits[:15]
-    primary_hits = primary_hits[:8]
+    primary_hits = primary_hits[:15]
 
     # ===== SECTION_SURVIVAL_PATCH =====
     # Guarantee: when a section-intent query is detected, every element that

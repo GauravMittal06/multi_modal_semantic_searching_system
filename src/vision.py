@@ -118,14 +118,29 @@ def analyze_image(image_path: str) -> Dict[str, Any]:
         keywords = []
         chart_facts = ""
 
-        for line in response_text.splitlines():
+        # After
+        lines = response_text.splitlines()
+        current_field = None
+        summary_lines, chart_facts_lines = [], []
+        
+        for line in lines:
             if line.startswith("SUMMARY:"):
-                summary = line.replace("SUMMARY:", "").strip()
+                current_field = "summary"
+                summary_lines.append(line.replace("SUMMARY:", "").strip())
             elif line.startswith("KEYWORDS:"):
+                current_field = "keywords"
                 kw_raw = line.replace("KEYWORDS:", "").strip()
                 keywords = [k.strip() for k in kw_raw.split(",") if k.strip()]
             elif line.startswith("CHART_FACTS:"):
-                chart_facts = line.replace("CHART_FACTS:", "").strip()
+                current_field = "chart_facts"
+                chart_facts_lines.append(line.replace("CHART_FACTS:", "").strip())
+            elif current_field == "summary" and line.strip():
+                summary_lines.append(line.strip())
+            elif current_field == "chart_facts" and line.strip():
+                chart_facts_lines.append(line.strip())
+        
+        summary = " ".join(summary_lines).strip()
+        chart_facts = " ".join(chart_facts_lines).strip()
 
         if not summary:
             summary = response_text.strip()

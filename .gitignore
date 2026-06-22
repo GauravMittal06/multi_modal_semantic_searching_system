@@ -1,3 +1,24 @@
+# Environments and Secrets
 .env
+
+# Python Cache
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Logs
+*.log
+backend.log
+backend2.log
+
+# Caches and Serialized Data
+bm25_cache/
+*.pkl
+
+# Generated Outputs
+extracted_images/
+
+# Large Source Documents
+*.pdf
+IPCC_AR6_SYR_LongerReport.pdf
+tsla-20241231-gen.pdf

@@ -171,7 +171,7 @@ def extract_from_pdf(filepath: str, source_name: str) -> List[Dict[str, Any]]:
                 )
 
             else:
-                if len(block_text) > 20:
+                if len(block_text.strip()) >= 5:
                     elements.append(
                         _make_element(
                             "paragraph",
