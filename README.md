@@ -121,7 +121,7 @@ app.py             →  Streamlit UI with graph view, reasoning chain, source at
 
 | Metric | Result |
 |---|---|
-| Single-document benchmark | 26/30 (86.7%) |
+| Single-document benchmark | 147/160 (91.87%) |
 | Modalities handled | Text ✅ Tables ✅ Images ✅ |
 | Cross-element QA | ✅ Demonstrated |
 | Multi-document QA | ✅ Up to 3 documents |
