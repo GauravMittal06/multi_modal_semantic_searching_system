@@ -52,12 +52,9 @@ RELATION_LABEL = {
     "caption_of": "captions",
     "related_table": "relates to",
     "visualizes": "visualizes",
+    "cross_document": "connects across documents to",
 }
 
-# Longer, full-sentence form for the Evidence Chain / explainability text
-# (Task 5), where there's room for a complete business-readable sentence
-# rather than a compact edge label. Falls back to RELATION_LABEL's phrase
-# if a relation type isn't covered here.
 RELATION_SENTENCE = {
     "owns": "Section heading provides context for this {dst_type}",
     "explains": "{src_type} explains the {dst_type}",
@@ -65,6 +62,7 @@ RELATION_SENTENCE = {
     "caption_of": "{src_type} captions the {dst_type}",
     "related_table": "{src_type} and {dst_type} relate to the same topic",
     "visualizes": "{src_type} and {dst_type} describe the same business metric",
+    "cross_document": "{src_type} from one document connects to {dst_type} from another",
 }
 
 
@@ -243,7 +241,28 @@ def evidence_chain_from_subgraph(
         if e.get("is_primary") and e.get("type") != "heading"
     }
 
+    # Inject synthetic cross-document edges between evidence elements
+    # from different source documents. These don't exist in the persisted
+    # graph (which is per-document) but are valid for explainability since
+    # both elements were retrieved and used together to answer the query.
+    _evidence_elems = [elem_by_id[eid] for eid in evidence_ids if eid in elem_by_id]
+    _docs_present = set(e.get("source_document", "") for e in _evidence_elems)
+    if len(_docs_present) > 1:
+        _by_doc: Dict[str, List[str]] = {}
+        for e in _evidence_elems:
+            doc = e.get("source_document", "")
+            eid = e.get("element_id") or e.get("id")
+            if doc and eid:
+                _by_doc.setdefault(doc, []).append(eid)
+        _doc_list = list(_by_doc.keys())
+        for i in range(len(_doc_list) - 1):
+            src_eid = _by_doc[_doc_list[i]][0]
+            dst_eid = _by_doc[_doc_list[i + 1]][0]
+            if not graph.has_edge(src_eid, dst_eid):
+                graph.add_edge(src_eid, dst_eid, relation="cross_document")
+
     raw_steps: List[Dict[str, Any]] = []
+    labels: List[str] = []
     seen = set()
 
     for src, dst, data in graph.edges(data=True):

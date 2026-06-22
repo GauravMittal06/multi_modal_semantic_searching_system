@@ -65,6 +65,11 @@ def ingest_document(filepath: str, original_filename: str = None) -> Dict[str, A
         "relation_types": graph_summary["relation_types"],
     }
 
+def delete_document(source_name: str) -> None:
+    """Remove all Qdrant vectors and BM25 index entries for a single document."""
+    delete_by_source(source_name)
+    delete_bm25_index(source_name)
+    print(f"[ingest] 🗑️ Removed: {source_name}")
 
 if __name__ == "__main__":
     import sys

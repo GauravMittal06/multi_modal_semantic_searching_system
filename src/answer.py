@@ -55,6 +55,8 @@ def generate_answer(
 
     formatted_context = format_context_for_llm(context_elements)
 
+    doc_count = max((e.get("_doc_count", 1) for e in context_elements), default=1)
+
     # Step 3: Build prompt
     prompt = f"""You are an expert document analyst. Answer questions using ONLY the provided document context below.
 
@@ -68,13 +70,14 @@ Rules:
     1. Cross-reference paragraphs WITH tables AND images to form complete answers.
     2. When a TABLE contains relevant numbers, quote them explicitly.
     3. When an IMAGE description contains trends or insights, cite them as visual evidence.
-    4. Never invent data. If context is insufficient, say: "The document does not contain sufficient information to answer this question."
+    4. Never invent data. Use only what is explicitly stated in the context. {"If the context contains partial information from some documents but not others, synthesize what is available and clearly note what is missing. Only say the documents do not contain sufficient information if the context contains nothing relevant at all." if doc_count > 1 else 'If context is insufficient, say: "The document does not contain sufficient information to answer this question."'}
     5. Numbers in context written as "USD" mean "$" and "pct" means "%".
     6. If two or more pieces of evidence equally and independently support different conclusions, do NOT invent a tiebreaker (such as order of mention, alphabetical order, or position in a sentence) to force a single answer. Instead, explicitly state that the evidence is split, name each supporting conclusion, and explain exactly what evidence supports each one. Only pick a single answer if the evidence itself — not your own assumption — clearly favors one over the other.
     7. If a TABLE element lacks a [TABLE COLUMNS:] header, treat the first pipe-separated row as the column header row when interpreting it.
     8. When answering questions about a specific Figure or Table, prioritize evidence from the referenced Figure/Table and its directly related paragraphs over general document discussion.
     9. If a Figure or Table contains the exact answer, answer from that evidence first before using supporting narrative text.
     10. Prefer concise answers. Do not list unrelated values, scenarios, or metrics unless they are required to answer the question.
+    {"11. Multiple documents are in context. When synthesizing across them, explicitly attribute each fact to its source document by name. Never merge facts from different documents without labeling which came from where." if doc_count > 1 else ""}
 CONTEXT:
 {formatted_context}
 

@@ -26,7 +26,6 @@ from src.graph_view import (
 import streamlit.components.v1 as components
 
 
-# ─── Cleanup Helper (unchanged backend-adjacent utility) ──────────────────────
 def clear_temp_vision_artifacts():
     """
     Removes:
@@ -103,10 +102,12 @@ st.markdown("""
        :has() lets the chat input react to the sidebar's expanded/
        collapsed state purely in CSS, with no JS/polling required. */
     div[data-testid="stAppViewContainer"]:has(section[data-testid="stSidebar"][aria-expanded="true"]) [data-testid="stChatInput"] {
-        left: 21rem;
+        left: 336px;
+        transition: left 0.3s ease;
     }
     div[data-testid="stAppViewContainer"]:has(section[data-testid="stSidebar"][aria-expanded="false"]) [data-testid="stChatInput"] {
-        left: 0rem;
+        left: 0px;
+        transition: left 0.3s ease;
     }
 </style>
 <style>
@@ -206,31 +207,74 @@ st.markdown("""
 
 # ─── Judge-Friendly Render Helpers ─────────────────────────────────────────────
 
-def render_trust_summary(explainability: dict, citations: list):
-    """
-    Always-visible one-line trust summary directly under the answer:
-    confidence + source count + modalities used. Surfaces the core judging
-    criteria (explainability, multi-modal evidence) in a single glance,
-    with zero clicks required.
-    """
+def render_answer_block(result: dict, key: str):
+    explainability = result.get("explainability")
+    citations = result.get("citations") or []
+    context_elements = result.get("context_elements") or result.get("context_used") or []
+
+    st.markdown(result.get("answer", ""))
+
+    if result.get("error"):
+        st.warning(f"Warning: {result['error']}")
+
     if not explainability and not citations:
         return
-    confidence = (explainability or {}).get("confidence", "Low")
-    badge = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}.get(confidence, "🔴")
-    n_sources = len(citations or [])
-    mods = (explainability or {}).get("modalities_used", {})
-    mod_labels = [label for label, key in [("Text", "text"), ("Table", "table"), ("Image", "image")] if mods.get(key)]
-    mod_str = " + ".join(mod_labels) if mod_labels else "—"
-    st.markdown(
-        f"<div class='trust-summary'>"
-        f"<span>{badge} <b>{confidence} confidence</b></span>"
-        f"<span style='color:#3A3F4B'>|</span>"
-        f"<span>📎 {n_sources} source{'s' if n_sources != 1 else ''}</span>"
-        f"<span style='color:#3A3F4B'>|</span>"
-        f"<span>🧩 {mod_str}</span>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
+
+    # ── Animated toggle buttons ──────────────────────────────────────────
+    state_key = f"view_{key}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = None
+
+    st.markdown("""
+    <style>
+    .panel-animate {
+        animation: fadeSlideIn 0.25s ease;
+        transform-origin: top;
+    }
+    @keyframes fadeSlideIn {
+        from { opacity: 0; transform: translateY(-8px) scaleY(0.96); }
+        to   { opacity: 1; transform: translateY(0)   scaleY(1);    }
+    }
+    .action-btn button, .action-btn-active button {
+        transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    btn_cols = st.columns(3)
+    labels = [
+        ("🕸️ Relationship Graph", "graph"),
+        ("🔗 Reasoning Chain",    "reasoning"),
+        ("📎 Sources",            "sources"),
+    ]
+    for col, (label, view) in zip(btn_cols, labels):
+        active = st.session_state[state_key] == view
+        if col.button(
+            label,
+            key=f"{key}_{view}",
+            use_container_width=True,
+            type="primary" if active else "secondary",
+        ):
+            st.session_state[state_key] = None if active else view
+            st.rerun()
+
+    active_view = st.session_state[state_key]
+    if active_view:
+        st.markdown("<div class='panel-animate'>", unsafe_allow_html=True)
+        with st.container(border=True):
+            if active_view == "graph":
+                st.markdown("**🕸️ Relationship Graph**")
+                render_relationship_graph(context_elements)
+            elif active_view == "reasoning":
+                st.markdown("**🔗 Reasoning Chain**")
+                render_reasoning_path(context_elements)
+            elif active_view == "sources":
+                st.markdown("**📎 Sources Used**")
+                render_sources(citations, explainability)
+                st.write("")
+                st.markdown("**🧩 Multi-Modal Evidence**")
+                render_modality_cards(explainability, context_elements)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_modality_cards(explainability: dict, context_elements: list):
@@ -341,7 +385,7 @@ def render_relationship_graph(context_elements: list):
     try:
         graph, elem_by_id = answer_subgraph_elements(context_elements)
     except Exception as e:
-        st.caption(f"Graph unavailable: {e}")
+        st.caption(f"DEBUG: {e}") 
         return
 
     if graph.number_of_nodes() == 0:
@@ -391,8 +435,6 @@ def render_answer_block(result: dict, key: str):
     if not explainability and not citations:
         return
 
-    render_trust_summary(explainability, citations)
-
     # ── One-click action row: each view is a single toggle, no nesting ──
     state_key = f"view_{key}"
     if state_key not in st.session_state:
@@ -430,8 +472,10 @@ def render_answer_block(result: dict, key: str):
 
 
 # ─── Session State ──────────────────────────────────────────────────────────────
+if "ingested_docs" not in st.session_state:
+    st.session_state.ingested_docs = {}        # {filename: stats}
 if "ingested_source" not in st.session_state:
-    st.session_state.ingested_source = None
+    st.session_state.ingested_source = None    # last ingested (legacy compat)
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "ingest_stats" not in st.session_state:
@@ -442,6 +486,8 @@ if "full_graph_info" not in st.session_state:
     st.session_state.full_graph_info = None
 if "dev_mode" not in st.session_state:
     st.session_state.dev_mode = False
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
 
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
@@ -456,6 +502,7 @@ with st.sidebar:
         type=["pdf", "docx"],
         help="Upload a document to analyze",
         label_visibility="collapsed",
+        key=f"uploader_{st.session_state.uploader_key}",
     )
 
     st.markdown("**Step 2 — Process**")
@@ -471,37 +518,60 @@ with st.sidebar:
                     stats = ingest_document(tmp_path, original_filename=uploaded_file.name)
                     os.unlink(tmp_path)
 
+                    st.session_state.ingested_docs[uploaded_file.name] = stats
                     st.session_state.ingested_source = uploaded_file.name
                     st.session_state.ingest_stats = stats
-                    st.session_state.chat_history = []
                     st.session_state.full_graph_html = None
                     st.session_state.full_graph_info = None
-                    st.success(f"✅ Ready: {uploaded_file.name}")
+                    st.session_state.uploader_key += 1  # resets the file_uploader widget
+                    st.rerun()
                 except Exception as e:
                     st.error(f"❌ Processing failed: {e}")
     else:
         st.caption("Upload a document above to enable processing.")
 
-    st.markdown("**Step 3 — Ask**")
-    if st.session_state.ingested_source:
-        stats = st.session_state.ingest_stats or {}
-        n_elements = stats.get("total_elements", "—")
-        n_edges = stats.get("graph_edges", "—")
-        type_counts = stats.get("type_counts", {})
-        n_modalities = sum(1 for k in ("text", "paragraph", "table", "image") if type_counts.get(k))
+    st.divider()
+    if st.session_state.ingested_docs:
+        for doc_name, stats in list(st.session_state.ingested_docs.items()):
+            n_elements = stats.get("total_elements", "—")
+            n_edges = stats.get("graph_edges", "—")
+            type_counts = stats.get("type_counts", {})
+            n_modalities = sum(1 for k in ("text", "paragraph", "table", "image") if type_counts.get(k))
 
-        st.markdown(
-            f"<div class='sidebar-success-card'>"
-            f"<div style='font-weight:600;margin-bottom:6px;'>📄 {st.session_state.ingested_source}</div>"
-            f"<div class='sidebar-check-line'>✓ {n_elements} Elements Indexed</div>"
-            f"<div class='sidebar-check-line'>✓ {n_edges} Relationships Mapped</div>"
-            f"<div class='sidebar-check-line'>✓ {n_modalities} Modalities Processed</div>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-        st.caption("Ask anything about this document in the Chat tab.")
+            st.markdown(
+                f"<div class='sidebar-success-card' style='position:relative;padding-right:36px;'>"
+                f"<div style='font-weight:600;margin-bottom:6px;'>📄 {doc_name}</div>"
+                f"<div class='sidebar-check-line'>✓ {n_elements} Elements Indexed</div>"
+                f"<div class='sidebar-check-line'>✓ {n_edges} Relationships Mapped</div>"
+                f"<div class='sidebar-check-line'>✓ {n_modalities} Modalities Processed</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("✕ Remove", key=f"remove_{doc_name}", use_container_width=True):
+                    try:
+                        from src.ingest import delete_document
+                        delete_document(doc_name)
+                    except Exception:
+                        pass  # backend handles it; don't block UI
+                    del st.session_state.ingested_docs[doc_name]
+                    if st.session_state.ingested_source == doc_name:
+                        remaining = list(st.session_state.ingested_docs.keys())
+                        st.session_state.ingested_source = remaining[-1] if remaining else None
+                        st.session_state.ingest_stats = st.session_state.ingested_docs.get(st.session_state.ingested_source)
+                    st.session_state.full_graph_html = None
+                    st.session_state.full_graph_info = None
+                    st.rerun()
 
-        if st.button("🗑️ Clear Session", use_container_width=True):
+        st.caption("Ask anything about these documents in the Chat tab.")
+
+        if st.button("🗑️ Clear All", use_container_width=True):
+            try:
+                from src.ingest import delete_document
+                for doc_name in list(st.session_state.ingested_docs.keys()):
+                    delete_document(doc_name)
+            except Exception:
+                pass
+            st.session_state.ingested_docs = {}
             st.session_state.ingested_source = None
             st.session_state.chat_history = []
             st.session_state.ingest_stats = None
@@ -538,7 +608,7 @@ with st.sidebar:
 st.title("🧠 Multi-Modal Document Intelligence")
 st.caption("Understands paragraphs, tables, and images together — not just text chunks.")
 
-if not st.session_state.ingested_source:
+if not st.session_state.ingested_docs:
     st.info("👈 Get started in 3 steps from the sidebar.")
 
     step_cols = st.columns(3)
@@ -584,8 +654,7 @@ else:
                             key=f"hist_{i}",
                         )
 
-        st.session_state.global_search_toggle = st.toggle("🌍 Search across all previously uploaded documents", value=False)
-        question = st.chat_input("Ask a question about the document...")
+        question = st.chat_input("Ask a question about your documents...")
 
         if question:
             st.session_state.chat_history.append({"role": "user", "content": question})
@@ -594,13 +663,9 @@ else:
 
             with st.chat_message("assistant"):
                 with st.spinner("Reading across paragraphs, tables, and images..."):
-                    # Use a session state toggle or UI element to determine the scope
-                    use_global_search = st.session_state.get("global_search_toggle", False)
-                    target_source = None if use_global_search else st.session_state.ingested_source
-                    
                     result = generate_answer(
                         question=question,
-                        source_document=target_source,
+                        source_document=None,  # always search across all ingested docs
                         top_k=8,
                     )
                 render_answer_block(

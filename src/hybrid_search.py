@@ -81,6 +81,40 @@ def hybrid_search(
         )
         print(f"[hybrid] bm25 hits: {len(bm25_hits)} (non-zero score) [global]")
 
+    # ── Document-level relevance scoring ─────────────────────────────────────
+    # For each source document, compute its aggregate relevance score as the
+    # mean of its top-3 chunk scores from dense retrieval. This captures
+    # "how relevant is this document as a whole" rather than just
+    # "how relevant is its best chunk".
+    # This score is then used to proportionally boost all chunks from that
+    # document in RRF, preventing low-vocabulary documents from being
+    # starved out entirely.
+    from collections import defaultdict
+
+    doc_chunk_scores: Dict[str, List[float]] = defaultdict(list)
+    for hit in dense_hits:
+        doc = hit.get("source_document", "")
+        if doc:
+            doc_chunk_scores[doc].append(hit.get("score", 0.0))
+
+    doc_relevance: Dict[str, float] = {}
+    for doc, scores in doc_chunk_scores.items():
+        top3 = sorted(scores, reverse=True)[:3]
+        doc_relevance[doc] = sum(top3) / len(top3)
+
+    # Normalize doc relevance scores to [0, 1] range
+    if doc_relevance:
+        max_doc_score = max(doc_relevance.values())
+        min_doc_score = min(doc_relevance.values())
+        score_range = max_doc_score - min_doc_score
+        if score_range > 0:
+            doc_relevance = {
+                doc: (score - min_doc_score) / score_range
+                for doc, score in doc_relevance.items()
+            }
+        else:
+            doc_relevance = {doc: 1.0 for doc in doc_relevance}
+
     # ── Build element_id → payload map ───────────────────────────────────────
     # Dense hits use element_id from payload.
     # BM25 hits use element_id from metadata.
@@ -121,6 +155,18 @@ def hybrid_search(
             score += _rrf_score(dense_rank[eid])
         if eid in bm25_rank:
             score += _rrf_score(bm25_rank[eid])
+
+        # Apply document-level relevance boost only in multi-doc mode.
+        # Single-doc: doc_relevance has one entry normalized to 1.0, boost
+        # is uniform and has no effect on relative ranking — zero regression.
+        if len(doc_relevance) > 1:  # strictly multi-doc only, never fires for single-doc
+            doc = all_elements[eid].get("source_document", "")
+            doc_boost = doc_relevance.get(doc, 0.5)
+            score = score * (1.0 + 0.15 * doc_boost)
+        # Boost weight of 0.15 means doc-level signal contributes 15% of
+        # the final score. Keeps chunk-level relevance dominant while
+        # preventing complete starvation of lower-scoring documents.
+
         rrf_scores[eid] = score
 
     # ── Sort and assemble output ──────────────────────────────────────────────

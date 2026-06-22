@@ -198,6 +198,35 @@ def retrieve_context(
     print(f"[STAGE_C_PROBE] IS PRIORITY 2 IN matched_in_section? -> {_priority2_in_matched}")
     print("[STAGE_C_PROBE] ===== END matched_in_section DUMP =====\n")
 
+    # ── Query-scope detection ─────────────────────────────────────────────────
+    _pre_scope_doc_count = len(set(h.get("source_document", "") for h in primary_hits if h.get("source_document")))
+    if _pre_scope_doc_count > 1:
+        from collections import defaultdict as _dd
+        _doc_scores: Dict[str, list] = _dd(list)
+        for h in primary_hits:
+            doc = h.get("source_document", "")
+            if doc:
+                _doc_scores[doc].append(h.get("rrf_score", h.get("score", 0.0)))
+
+        _doc_avg: Dict[str, float] = {
+            doc: sum(scores) / len(scores)
+            for doc, scores in _doc_scores.items()
+        }
+        _best_avg = max(_doc_avg.values(), default=0.0)
+        RELEVANCE_RATIO = 0.4
+        _irrelevant_docs = {
+            doc for doc, avg in _doc_avg.items()
+            if _best_avg > 0 and avg < _best_avg * RELEVANCE_RATIO
+        }
+        if _irrelevant_docs:
+            print(f"[query-scope] Suppressing irrelevant docs: {_irrelevant_docs}")
+            primary_hits = [
+                h for h in primary_hits
+                if h.get("source_document", "") not in _irrelevant_docs
+            ]
+        else:
+            print(f"[query-scope] All docs relevant: {set(_doc_avg.keys())}")
+
     primary_hits.sort(key=lambda h: h["reranked_score"], reverse=True)
     print("\n===== TOP 20 AFTER RERANK =====")
 
@@ -229,8 +258,18 @@ def retrieve_context(
         )
     print("[STAGE_D_PROBE] ===== END PRE-TRUNCATION DUMP =====\n")
 
-    expanded_seed_hits = primary_hits[:15]
-    primary_hits = primary_hits[:15]
+    doc_count = len(set(h.get("source_document", "") for h in primary_hits if h.get("source_document")))
+    if doc_count <= 1:
+        para_limit, table_limit, image_limit = 8, 5, 5
+        seed_cap = 15
+    else:
+        para_limit  = min(8 + (doc_count - 1) * 4, 24)
+        table_limit = min(5 + (doc_count - 1) * 2, 12)
+        image_limit = min(5 + (doc_count - 1) * 2, 12)
+        seed_cap    = min(15 + (doc_count - 1) * 8, 50)
+
+    expanded_seed_hits = primary_hits[:seed_cap]
+    primary_hits = primary_hits[:seed_cap]
 
     # ===== SECTION_SURVIVAL_PATCH =====
     # Guarantee: when a section-intent query is detected, every element that
@@ -427,7 +466,8 @@ def retrieve_context(
         final_deduped.append(elem)
 
     # ── Type-balanced context cap ─────────────────────────────────────────────
-    TYPE_LIMITS = {"paragraph": 8, "table": 5, "image": 5, "heading": 2}
+    # para_limit, table_limit, image_limit already computed above near seed_cap
+    TYPE_LIMITS = {"paragraph": para_limit, "table": table_limit, "image": image_limit, "heading": 2}
     type_counts = {t: 0 for t in TYPE_LIMITS}
     balanced = []
 
@@ -440,8 +480,21 @@ def retrieve_context(
             type_counts[t] = type_counts.get(t, 0) + 1
             balanced.append(elem)
 
+    primary_scores = [
+        elem.get("reranked_score", 0.0)
+        for elem in final_deduped
+        if elem.get("is_primary")
+    ]
+    score_floor = (
+        sorted(primary_scores, reverse=True)[min(8, len(primary_scores)) - 1]
+        if len(primary_scores) >= 8
+        else -999.0
+    )
+
     for elem in final_deduped:
-        if elem.get("is_primary"):
+        if not elem.get("is_primary"):
+            continue
+        if elem.get("reranked_score", 0.0) < score_floor and doc_count > 1:
             continue
         t = elem.get("type", "paragraph")
         limit = TYPE_LIMITS.get(t, 3)
@@ -527,6 +580,10 @@ def retrieve_context(
 
     print("[STAGE_RETURN_PROBE] ===== END FINAL RETURN DUMP =====\n")
 
+    _final_doc_count = len(set(e.get("source_document", "") for e in balanced if e.get("source_document")))
+    _stamp_doc_count = max(_final_doc_count, doc_count)
+    for elem in balanced:
+        elem["_doc_count"] = _stamp_doc_count
     return balanced
 
 def _extract_reference(query: str):
@@ -797,11 +854,15 @@ def build_explainability(
         e.get("reranked_score", 0.0) for e in context_elements if e.get("is_primary")
     ) / max(sum(1 for e in context_elements if e.get("is_primary")), 1)
 
-    if avg_score >= HIGH_CONFIDENCE and citations:
+    doc_count = max((e.get("_doc_count", 1) for e in context_elements), default=1)
+    high_thresh   = 0.5  if doc_count > 1 else HIGH_CONFIDENCE
+    medium_thresh = -1.5 if doc_count > 1 else MEDIUM_CONFIDENCE
+
+    if avg_score >= high_thresh and citations:
         confidence = "High"
         if modality_count < 2:
             confidence = "Medium"
-    elif avg_score >= MEDIUM_CONFIDENCE:
+    elif avg_score >= medium_thresh:
         confidence = "Medium"
     else:
         confidence = "Low"
