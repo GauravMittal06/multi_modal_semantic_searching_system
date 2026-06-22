@@ -199,14 +199,8 @@ def search_elements(
             query_filter=query_filter,
         )
     except Exception as e:
-        print(f"[rag_core] Search with filter failed ({e}), retrying without filter.")
-        results = _qdrant.search(
-            collection_name=QDRANT_COLLECTION,
-            query_vector=query_vector,
-            limit=k,
-            with_payload=True,
-            with_vectors=False,
-        )
+        print(f"[rag_core] Search with filter failed ({e}). Raising exception to prevent cross-document leakage.")
+        raise e
 
     output = []
     for hit in results:

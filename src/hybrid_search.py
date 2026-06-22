@@ -14,10 +14,10 @@ from typing import List, Dict, Any, Optional
 
 try:
     from .rag_core import search_elements
-    from .bm25_index import search_bm25
+    from .bm25_index import search_bm25, search_all_bm25
 except ImportError:
     from rag_core import search_elements
-    from bm25_index import search_bm25
+    from bm25_index import search_bm25, search_all_bm25
 
 # ── RRF constant ──────────────────────────────────────────────────────────────
 # k=60 is the standard value from the original RRF paper (Cormack et al. 2009).
@@ -73,9 +73,13 @@ def hybrid_search(
             source_document=source_document,
             k=bm25_k,
         )
-        print(f"[hybrid] bm25 hits: {len(bm25_hits)} (non-zero score)")
+        print(f"[hybrid] bm25 hits: {len(bm25_hits)} (non-zero score) [filtered]")
     else:
-        print("[hybrid] No source_document specified — skipping BM25 (cross-document BM25 not supported)")
+        bm25_hits = search_all_bm25(
+            query=question,
+            k=bm25_k,
+        )
+        print(f"[hybrid] bm25 hits: {len(bm25_hits)} (non-zero score) [global]")
 
     # ── Build element_id → payload map ───────────────────────────────────────
     # Dense hits use element_id from payload.

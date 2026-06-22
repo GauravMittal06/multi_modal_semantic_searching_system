@@ -584,6 +584,7 @@ else:
                             key=f"hist_{i}",
                         )
 
+        st.session_state.global_search_toggle = st.toggle("🌍 Search across all previously uploaded documents", value=False)
         question = st.chat_input("Ask a question about the document...")
 
         if question:
@@ -593,9 +594,13 @@ else:
 
             with st.chat_message("assistant"):
                 with st.spinner("Reading across paragraphs, tables, and images..."):
+                    # Use a session state toggle or UI element to determine the scope
+                    use_global_search = st.session_state.get("global_search_toggle", False)
+                    target_source = None if use_global_search else st.session_state.ingested_source
+                    
                     result = generate_answer(
                         question=question,
-                        source_document=st.session_state.ingested_source,
+                        source_document=target_source,
                         top_k=8,
                     )
                 render_answer_block(

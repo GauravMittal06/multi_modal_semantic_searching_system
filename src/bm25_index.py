@@ -177,3 +177,54 @@ def search_bm25(
         results.append(entry)
 
     return results
+
+def search_all_bm25(
+    query: str,
+    k: int = 60,
+) -> List[Dict[str, Any]]:
+    """
+    BM25 lexical search across all cached document indexes.
+    Merges results globally and returns the top k hits.
+    """
+    all_results = []
+    
+    if not os.path.exists(_CACHE_DIR):
+        return []
+
+    tokens = _tokenize(query)
+    if not tokens:
+        return []
+
+    for filename in os.listdir(_CACHE_DIR):
+        if not filename.endswith(".bm25.pkl"):
+            continue
+            
+        path = os.path.join(_CACHE_DIR, filename)
+        try:
+            with open(path, "rb") as f:
+                payload = pickle.load(f)
+            
+            index: BM25Okapi = payload["index"]
+            metadata: List[Dict] = payload["metadata"]
+            
+            scores = index.get_scores(tokens)
+            scored = sorted(
+                enumerate(scores),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            
+            # Take top k from this specific document
+            for idx, score in scored[:k]:
+                if score <= 0.0:
+                    break
+                entry = dict(metadata[idx])
+                entry["bm25_score"] = float(score)
+                all_results.append(entry)
+                
+        except Exception as e:
+            print(f"[bm25] Failed to search index file {filename}: {e}")
+
+    # Sort globally across all documents and take the absolute top k
+    all_results.sort(key=lambda x: x["bm25_score"], reverse=True)
+    return all_results[:k]
