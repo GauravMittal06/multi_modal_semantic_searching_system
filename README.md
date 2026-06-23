@@ -166,7 +166,7 @@ streamlit run app.py
 ```
 
 ### 6. Usage
-1. Upload one or more PDF documents using the sidebar
+1. Upload one or more PDF/ DOCX documents using the sidebar
 2. Wait for ingestion to complete (progress shown per document)
 3. Type a question in the chat input
 4. View the answer, citations, reasoning chain, and relationship graph
