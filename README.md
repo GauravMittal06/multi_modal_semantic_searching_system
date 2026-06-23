@@ -174,7 +174,7 @@ streamlit run app.py
 ├── app.py                  # Streamlit frontend
 ├── config.py               # API keys and config
 ├── src/
-│   ├── extractor.py        # PDF parsing (text, tables, images)
+│   ├── extractor.py        # PDF and DOCX parsing (text, tables, images)
 │   ├── vision.py           # Gemini Vision image summarization
 │   ├── relationships.py    # NetworkX relationship graph builder
 │   ├── ingest.py           # Embedding + Qdrant + BM25 indexing
