@@ -146,24 +146,16 @@ cd <project-folder>
 pip install -r requirements.txt
 ```
 
-### 3. Start Qdrant
-```bash
-docker run -p 6333:6333 qdrant/qdrant
-```
+### 3. Configure API keys
+Create a `.env` file at the project root with your API keys. You will need your Gemini key and the credentials for the remote Qdrant database:
 
-### 4. Configure API keys
-Create a `config.py` (or `.env`) at the project root:
-```python
-GEMINI_KEY = "your-gemini-api-key"
-GEMINI_MODEL = "gemini-2.0-flash"
-QDRANT_HOST = "localhost"
-QDRANT_PORT = 6333
-```
+GEMINI_API_KEY="your-gemini-api-key"
+QDRANT_URL="your-qdrant-cloud-url"
+QDRANT_API_KEY="your-qdrant-api-key"
 
-### 5. Run the app
+### 4. Run the app
 ```bash
 streamlit run app.py
-```
 
 ### 6. Usage
 1. Upload one or more PDF/ DOCX documents using the sidebar
