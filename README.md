@@ -1,7 +1,7 @@
 # 🧠 MultiModal Semantic Integration for Intelligent Document Understanding
 
--**Team:** Delluminati
--**Hackathon:** Dell FutureMinds AI Hackathon 2026 — Problem Statement 2
+- **Team:** Delluminati
+- **Hackathon:** Dell FutureMinds AI Hackathon 2026 — Problem Statement 2
 
 ---
 
@@ -149,15 +149,18 @@ pip install -r requirements.txt
 ### 3. Configure API keys
 Create a `.env` file at the project root with your API keys. You will need your Gemini key and the credentials for the remote Qdrant database:
 
+```env
 GEMINI_API_KEY="your-gemini-api-key"
 QDRANT_URL="your-qdrant-cloud-url"
 QDRANT_API_KEY="your-qdrant-api-key"
+```
 
 ### 4. Run the app
 ```bash
 streamlit run app.py
+```
 
-### 6. Usage
+### 5. Usage
 1. Upload one or more PDF/ DOCX documents using the sidebar
 2. Wait for ingestion to complete (progress shown per document)
 3. Type a question in the chat input
